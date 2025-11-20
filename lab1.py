@@ -12,6 +12,9 @@ from pathlib import Path
 class URL:
     """URL을 파싱하고 관리하는 클래스"""
     
+    # 클래스 변수: 소켓 캐시 (host:port를 키로 사용)
+    _socket_cache = {}
+    
     def __init__(self, url):
         # 더 안정적인 파싱을 위해 urllib.parse 사용
         parsed = urlparse(url)
@@ -112,27 +115,38 @@ class URL:
                 # '�� invalid utf8 �' 이처럼 변환이 됨, U+FFFD
             return data.decode('utf8', errors='replace')
         
-        # 1. 소켓 생성 - 서버와의 연결 통로
-        s = socket.socket(
-            family=socket.AF_INET,      # IPv4 사용
-            type=socket.SOCK_STREAM,    # TCP 연결
-            proto=socket.IPPROTO_TCP,   # TCP 프로토콜
-        )
+        # 1. 소켓 캐시 확인 및 재사용
+        cache_key = f"{self.scheme}://{self.host}:{self.port}"
+        s = URL._socket_cache.get(cache_key)
         
-        # 2. 서버에 연결
-        s.connect((self.host, self.port))
+        # 기존 소켓이 없거나 닫혀있으면 새로 생성
+        if s is None:
+            print(f"🔌 새 연결 생성: {cache_key}")
+            s = socket.socket(
+                family=socket.AF_INET,      # IPv4 사용
+                type=socket.SOCK_STREAM,    # TCP 연결
+                proto=socket.IPPROTO_TCP,   # TCP 프로토콜
+            )
+            
+            # 2. 서버에 연결
+            s.connect((self.host, self.port))
+            
+            # 3. HTTPS인 경우 TLS로 암호화
+            if self.scheme == "https":
+                ctx = ssl.create_default_context()
+                s = ctx.wrap_socket(s, server_hostname=self.host)
+            
+            # 캐시에 저장
+            URL._socket_cache[cache_key] = s
+        else:
+            print(f"♻️  기존 연결 재사용: {cache_key}")
         
-        # 3. HTTPS인 경우 TLS로 암호화
-        if self.scheme == "https":
-            ctx = ssl.create_default_context()
-            s = ctx.wrap_socket(s, server_hostname=self.host)
-        
-        # 4. HTTP 요청 메시지 작성 (HTTP/1.1 지원)
+        # 4. HTTP 요청 메시지 작성 (HTTP/1.1 지원, Keep-Alive)
         # GET 메서드로 특정 경로의 리소스를 요청
         request = "GET {} HTTP/1.1\r\n".format(self.path)
         request += "Host: {}\r\n".format(self.host)
-        # 기본적으로 HTTP/1.1은 연결을 그대로 유지(keep-alive)하지만, 여기서는 close로 한다.
-        request += "Connection: close\r\n"
+        # Keep-Alive 사용 (연결 유지)
+        request += "Connection: keep-alive\r\n"
         request += "User-Agent: Mozilla/5.0 (CustomBrowser)\r\n"
         # 압축 지원을 서버에 알림
         request += "Accept-Encoding: gzip, deflate, br\r\n"
@@ -171,6 +185,9 @@ class URL:
                 new_uri = urljoin(base, loc)
                 # 로그에 현재->새 URL 기록
                 redirect_log.append((base, new_uri))
+                # 리다이렉트 시 소켓 캐시에서 제거하고 닫기
+                if cache_key in URL._socket_cache:
+                    del URL._socket_cache[cache_key]
                 s.close()
                 # Don't return immediately — call inner request and then
                 # let this frame finish so it can print the redirect trace
@@ -223,14 +240,29 @@ class URL:
             for k, v in trailers.items():
                 response_headers[k] = v
         else:
+            # Content-Length 헤더를 사용하여 정확한 바이트 수만 읽기
             if "content-length" in response_headers:
                 length = int(response_headers["content-length"])
                 body = response.read(length)
+                print(f"📦 Content-Length: {length} 바이트 읽음")
             else:
                 # Content-Length가 없으면 소켓이 닫힐 때까지 읽음
                 body = response.read()
-
-        s.close()
+                print("⚠️  Content-Length 없음 - 소켓 닫힘")
+                # 캐시에서 제거하고 소켓 닫기
+                if cache_key in URL._socket_cache:
+                    del URL._socket_cache[cache_key]
+                s.close()
+        
+        # Connection 헤더 확인하여 소켓 유지 여부 결정
+        connection_header = response_headers.get("connection", "").lower()
+        if "close" in connection_header:
+            print("🔌 서버가 연결 종료 요청 - 소켓 닫기")
+            if cache_key in URL._socket_cache:
+                del URL._socket_cache[cache_key]
+            s.close()
+        else:
+            print("✅ 연결 유지 (Keep-Alive)")
         
         # 12. Content-Encoding에 따라 압축 해제
         encoding = response_headers.get("content-encoding", "").lower()
