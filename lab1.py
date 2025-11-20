@@ -5,7 +5,7 @@ import zlib
 import brotli
 import os
 import base64
-from urllib.parse import urlparse, unquote, unquote_to_bytes
+from urllib.parse import urlparse, unquote, unquote_to_bytes, urljoin
 from pathlib import Path
 
 
@@ -77,14 +77,22 @@ class URL:
         else:
             raise AssertionError(f"Unknown scheme {self.scheme}")
     
-    def request(self):
+    def request(self, redirects: int = 5, redirect_log=None):
         """서버에 HTTP 요청을 보내고 응답을 받는 함수"""
+        # redirect_log 초기화 (최상위 호출자가 None을 주면 여기서 생성하고
+        # 최종 결과 직전에 로그를 출력함)
+        created_local_log = False
+        if redirect_log is None:
+            redirect_log = []
+            created_local_log = True
+
         # view-source인 경우 내부 URL의 본문을 가져와 그대로 반환
         if getattr(self, 'scheme', None) == 'view-source':
             # view-source:example.com의 inner는 example.com임 따라서 반드시 있어야함
             if not hasattr(self, 'inner'):
                 raise ValueError('view-source missing inner URL')
-            return self.inner.request()
+            body = self.inner.request(redirects=redirects, redirect_log=redirect_log)
+            return body
         # data 스킴이면 URI에 포함된 데이터를 반환
         if getattr(self, 'scheme', None) == 'data':
             # Determine charset to decode bytes to text
@@ -150,8 +158,30 @@ class URL:
             # 국제화된 문자도 올바르게 처리
             response_headers[header.casefold()] = value.strip()
         
-        # 9. HTTP 상태 확인
-        assert status == "200", "{}: {}".format(status, explanation)
+        # 9. HTTP 상태 확인 및 리다이렉트 처리
+        status_code = int(status)
+        # 리다이렉트(3xx) 처리: Location 헤더가 있으면 따라간다
+        if 300 <= status_code < 400:
+            if redirects <= 0:
+                raise Exception('Too many redirects')
+            loc = response_headers.get('location')
+            if loc:
+                # 절대/상대 URL 모두 처리
+                base = f"{self.scheme}://{self.host}{self.path}"
+                new_uri = urljoin(base, loc)
+                # 로그에 현재->새 URL 기록
+                redirect_log.append((base, new_uri))
+                s.close()
+                # Don't return immediately — call inner request and then
+                # let this frame finish so it can print the redirect trace
+                body = URL(new_uri).request(redirects=redirects-1, redirect_log=redirect_log)
+                if created_local_log and redirect_log:
+                    print("Redirect trace:")
+                    for i, (src, dst) in enumerate(redirect_log, 1):
+                        print(f" {i}. {src} -> {dst}")
+                return body
+            # Location이 없으면 계속 진행하여 에러 처리
+        assert status_code == 200, "{}: {}".format(status_code, explanation)
 
         # 10. 본문(body) 읽기 - Transfer-Encoding: chunked 지원
         transfer_encoding = response_headers.get("transfer-encoding", "").lower()
@@ -226,7 +256,14 @@ class URL:
         
         # 13. 바이트를 문자열로 변환
         body = body.decode("utf8", errors="replace")
-        
+
+        # If we created the redirect_log in this call and there are entries,
+        # print the redirect trace for non-view-source requests as well.
+        if created_local_log and redirect_log:
+            print("Redirect trace:")
+            for i, (src, dst) in enumerate(redirect_log, 1):
+                print(f" {i}. {src} -> {dst}")
+
         return body
 
 
