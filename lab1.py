@@ -176,6 +176,7 @@ def show(body):
     """HTML에서 텍스트만 추출하여 출력하는 함수"""
     
     in_tag = False  # 현재 태그 안에 있는지 추적
+    entity = ""  # HTML 엔티티를 저장할 변수
     
     for c in body:
         if c == "<":
@@ -183,7 +184,29 @@ def show(body):
         elif c == ">":
             in_tag = False  # 태그 끝
         elif not in_tag:
-            print(c, end="")  # 태그 밖의 문자만 출력
+            # HTML 엔티티 처리
+            if c == "&":
+                entity = "&"
+            elif entity:
+                entity += c
+                if c == ";":
+                    # 엔티티 치환
+                    if entity == "&lt;":
+                        print("<", end="")
+                    elif entity == "&gt;":
+                        print(">", end="")
+                    elif entity == "&nbsp;":
+                        print(" ", end="")
+                    elif entity == "&amp;":
+                        print("&", end="")
+                    elif entity == "&quot;":
+                        print('"', end="")
+                    else:
+                        # 알 수 없는 엔티티는 그대로 출력
+                        print(entity, end="")
+                    entity = ""
+            else:
+                print(c, end="")  # 태그 밖의 문자만 출력
 
 
 def load(url):
