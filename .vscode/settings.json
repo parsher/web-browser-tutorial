@@ -1,0 +1,5 @@
+{
+    "terminal.integrated.env.windows": {
+        "Path": "${env:Path};C:\\Users\\m\\.local\\bin;C:\\Users\\m\\AppData\\Roaming\\npm"
+    }
+}
