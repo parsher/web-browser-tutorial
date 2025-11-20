@@ -150,15 +150,49 @@ class URL:
             # 국제화된 문자도 올바르게 처리
             response_headers[header.casefold()] = value.strip()
         
-        # 9. Transfer-Encoding 체크 (여전히 지원하지 않음)
-        assert "transfer-encoding" not in response_headers, \
-            "Transfer-Encoding not supported (chunked transfer)"
-        
-        # 10. HTTP 상태 확인
+        # 9. HTTP 상태 확인
         assert status == "200", "{}: {}".format(status, explanation)
-        
-        # 11. 본문(body) 읽기 - 바이너리로 읽음
-        body = response.read()
+
+        # 10. 본문(body) 읽기 - Transfer-Encoding: chunked 지원
+        transfer_encoding = response_headers.get("transfer-encoding", "").lower()
+
+        def read_chunked(rfile):
+            chunks = []
+            while True:
+                # 청크 크기 라인 읽기
+                line = rfile.readline().decode("ascii")
+                if not line:
+                    raise Exception("Unexpected EOF while reading chunk size")
+                line = line.strip()
+                # 사이즈 파싱 (세미콜론 뒤의 익스텐션 무시)
+                size_str = line.split(';', 1)[0]
+                try:
+                    size = int(size_str, 16)
+                except ValueError:
+                    raise Exception(f"Invalid chunk size: {size_str}")
+                if size == 0:
+                    # 트레일러 헤더(있다면) 읽고 종료
+                    while True:
+                        trailer = rfile.readline().decode("utf8")
+                        if trailer in ("\r\n", "\n", ""):
+                            break
+                    break
+                data = rfile.read(size)
+                chunks.append(data)
+                # 청크 끝의 CRLF 소비
+                rfile.read(2)
+            return b"".join(chunks)
+
+        if "chunked" in transfer_encoding:
+            body = read_chunked(response)
+        else:
+            if "content-length" in response_headers:
+                length = int(response_headers["content-length"])
+                body = response.read(length)
+            else:
+                # Content-Length가 없으면 소켓이 닫힐 때까지 읽음
+                body = response.read()
+
         s.close()
         
         # 12. Content-Encoding에 따라 압축 해제
