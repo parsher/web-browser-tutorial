@@ -66,11 +66,25 @@ class URL:
             self.data_bytes = data_bytes
             self.data_mediatype = mediatype
             self.data_charset = charset
+        elif self.scheme == "view-source":
+            # view-source:<inner-uri> -> store inner URL object to fetch its source
+            # extract the remainder after the first ':' (preserve // for http/https)
+            inner_uri = url[len('view-source:'):]
+            # allow whitespace tolerance
+            inner_uri = inner_uri.strip()
+            # create URL object for inner resource
+            self.inner = URL(inner_uri)
         else:
             raise AssertionError(f"Unknown scheme {self.scheme}")
     
     def request(self):
         """서버에 HTTP 요청을 보내고 응답을 받는 함수"""
+        # view-source인 경우 내부 URL의 본문을 가져와 그대로 반환
+        if getattr(self, 'scheme', None) == 'view-source':
+            # view-source:example.com의 inner는 example.com임 따라서 반드시 있어야함
+            if not hasattr(self, 'inner'):
+                raise ValueError('view-source missing inner URL')
+            return self.inner.request()
         # data 스킴이면 URI에 포함된 데이터를 반환
         if getattr(self, 'scheme', None) == 'data':
             # Determine charset to decode bytes to text
@@ -212,7 +226,11 @@ def show(body):
 def load(url):
     """URL을 받아서 웹 페이지를 다운로드하고 표시하는 메인 함수"""
     body = url.request()
-    show(body)
+    # If this is a view-source URL, print the raw source directly
+    if getattr(url, 'scheme', None) == 'view-source':
+        print(body)
+    else:
+        show(body)
 
 
 if __name__ == "__main__":
