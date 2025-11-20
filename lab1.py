@@ -47,6 +47,7 @@ class URL:
                 raise FileNotFoundError(f"File not found: {self.filepath}")
             with open(self.filepath, 'rb') as f:
                 data = f.read()
+                # '�� invalid utf8 �' 이처럼 변환이 됨, U+FFFD
             return data.decode('utf8', errors='replace')
         
         # 1. 소켓 생성 - 서버와의 연결 통로
