@@ -116,6 +116,9 @@ uv run lab1.py https://www.naver.com/
 
 # ✅ HTTPS + 압축
 uv run lab1.py https://browser.engineering/
+
+# ✅ 파일 읽기
+uv run lab1.py C:\Users\user\Projects\web-browser\README.md
 ```
 
 ## 주요 개선사항
