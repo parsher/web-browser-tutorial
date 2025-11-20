@@ -119,10 +119,13 @@ class URL:
             ctx = ssl.create_default_context()
             s = ctx.wrap_socket(s, server_hostname=self.host)
         
-        # 4. HTTP 요청 메시지 작성
+        # 4. HTTP 요청 메시지 작성 (HTTP/1.1 지원)
         # GET 메서드로 특정 경로의 리소스를 요청
-        request = "GET {} HTTP/1.0\r\n".format(self.path)
+        request = "GET {} HTTP/1.1\r\n".format(self.path)
         request += "Host: {}\r\n".format(self.host)
+        # 기본적으로 HTTP/1.1은 연결을 그대로 유지(keep-alive)하지만, 여기서는 close로 한다.
+        request += "Connection: close\r\n"
+        request += "User-Agent: Mozilla/5.0 (CustomBrowser)\r\n"
         # 압축 지원을 서버에 알림
         request += "Accept-Encoding: gzip, deflate, br\r\n"
         request += "\r\n"  # 헤더의 끝을 표시
