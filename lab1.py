@@ -4,7 +4,8 @@ import gzip
 import zlib
 import brotli
 import os
-from urllib.parse import urlparse, unquote
+import base64
+from urllib.parse import urlparse, unquote, unquote_to_bytes
 from pathlib import Path
 
 
@@ -35,11 +36,50 @@ class URL:
                 raw_path = raw_path.lstrip('/')
             # 로컬 파일 경로 저장
             self.filepath = raw_path
+        elif self.scheme == "data":
+            # data:[<mediatype>][;base64],<data>
+            # parsed.path may contain the whole data part; use the original URL
+            data_part = url.split(":", 1)[1]
+            try:
+                meta, data = data_part.split(",", 1)
+            except ValueError:
+                raise ValueError("Invalid data URI: missing comma separator")
+            meta_parts = meta.split(";") if meta else []
+            mediatype = meta_parts[0] if meta_parts and meta_parts[0] else "text/plain"
+            is_base64 = "base64" in meta_parts
+            # extract charset if present
+            charset = None
+            for part in meta_parts:
+                if part.startswith("charset="):
+                    charset = part.split("=", 1)[1]
+                    break
+            # decode data
+            if is_base64:
+                try:
+                    data_bytes = base64.b64decode(data)
+                except Exception as e:
+                    raise ValueError(f"Invalid base64 data in data URI: {e}")
+            else:
+                # percent-decoded bytes
+                data_bytes = unquote_to_bytes(data)
+            # store for request()
+            self.data_bytes = data_bytes
+            self.data_mediatype = mediatype
+            self.data_charset = charset
         else:
             raise AssertionError(f"Unknown scheme {self.scheme}")
     
     def request(self):
         """서버에 HTTP 요청을 보내고 응답을 받는 함수"""
+        # data 스킴이면 URI에 포함된 데이터를 반환
+        if getattr(self, 'scheme', None) == 'data':
+            # Determine charset to decode bytes to text
+            charset = self.data_charset or ("utf-8" if self.data_mediatype.startswith("text/") else "utf-8")
+            try:
+                return self.data_bytes.decode(charset, errors='replace')
+            except Exception:
+                return self.data_bytes.decode('utf-8', errors='replace')
+
         # file 스킴이면 로컬 파일을 읽어서 내용을 반환
         if getattr(self, 'scheme', None) == 'file':
             # 파일이 존재하는지 확인
@@ -158,15 +198,19 @@ if __name__ == "__main__":
     # 명령줄 인자로 URL을 받음
     # 예: python lab1.py http://example.org/
     if len(sys.argv) > 1:
-        raw = sys.argv[1]
-        # If user passed a plain filesystem path (no scheme) and it exists,
-        # convert it to a file:// URI so URL() can handle it.
-        if "://" not in raw:
-            if not os.path.exists(raw):
-                raise FileNotFoundError(f"File not found: {raw}")
-            uri = Path(raw).resolve().as_uri()
+        # Reconstruct URI for cases where shells (PowerShell) split data: URIs
+        # across multiple argv elements (commas, spaces). If any argument
+        # starts with 'data:', join all argv[1:] with spaces to rebuild it.
+        if any(arg.startswith('data:') for arg in sys.argv[1:]):
+            uri = ' '.join(sys.argv[1:])
         else:
-            uri = raw
+            raw = sys.argv[1]
+            # If user passed a plain filesystem path (no scheme) and it exists,
+            # convert it to a file:// URI so URL() can handle it.
+            if "://" not in raw and os.path.exists(raw):
+                uri = Path(raw).resolve().as_uri()
+            else:
+                uri = raw
         load(URL(uri))
     else:
         # 기본 테스트 URL

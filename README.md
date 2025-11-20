@@ -119,6 +119,9 @@ uv run lab1.py https://browser.engineering/
 
 # ✅ 파일 읽기
 uv run lab1.py C:\Users\user\Projects\web-browser\README.md
+
+# ✅ 데이터 읽기
+uv run lab1.py "data:text/html, Hello world!"
 ```
 
 ## 주요 개선사항
