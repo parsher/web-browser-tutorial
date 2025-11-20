@@ -3,32 +3,51 @@ import ssl
 import gzip
 import zlib
 import brotli
+import os
+from urllib.parse import urlparse, unquote
+from pathlib import Path
 
 
 class URL:
     """URL을 파싱하고 관리하는 클래스"""
     
     def __init__(self, url):
-        # URL의 scheme(http/https) 분리
-        self.scheme, url = url.split("://", 1)
-        assert self.scheme in ["http", "https"], \
-            "Unknown scheme {}".format(self.scheme)
-        
-        # host와 path 분리
-        # 예: "example.com/index.html" -> host="example.com", path="/index.html"
-        if "/" not in url:
-            url = url + "/"
-        self.host, url = url.split("/", 1)
-        self.path = "/" + url
-        
-        # 포트번호 설정 (http는 80, https는 443)
-        if self.scheme == "http":
-            self.port = 80
-        elif self.scheme == "https":
-            self.port = 443
+        # 더 안정적인 파싱을 위해 urllib.parse 사용
+        parsed = urlparse(url)
+        self.scheme = parsed.scheme
+
+        if self.scheme in ["http", "https"]:
+            # host와 path 분리
+            self.host = parsed.netloc
+            self.path = parsed.path or "/"
+            # 포트번호 설정 (http는 80, https는 443)
+            if self.scheme == "http":
+                self.port = 80
+            elif self.scheme == "https":
+                self.port = 443
+        elif self.scheme == "file":
+            # file URL: file:///C:/path or file:///home/user/file
+            # parsed.netloc는 보통 빈 문자열 또는 'localhost'
+            # unquote하지 않으면 os가 실제 경로를 찾지를 못함
+            raw_path = unquote(parsed.path)
+            # Windows 드라이브 표기 처리: '/C:/path' -> 'C:/path'
+            if os.name == 'nt' and raw_path.startswith("/") and len(raw_path) > 2 and raw_path[2] == ':' :
+                raw_path = raw_path.lstrip('/')
+            # 로컬 파일 경로 저장
+            self.filepath = raw_path
+        else:
+            raise AssertionError(f"Unknown scheme {self.scheme}")
     
     def request(self):
         """서버에 HTTP 요청을 보내고 응답을 받는 함수"""
+        # file 스킴이면 로컬 파일을 읽어서 내용을 반환
+        if getattr(self, 'scheme', None) == 'file':
+            # 파일이 존재하는지 확인
+            if not os.path.exists(self.filepath):
+                raise FileNotFoundError(f"File not found: {self.filepath}")
+            with open(self.filepath, 'rb') as f:
+                data = f.read()
+            return data.decode('utf8', errors='replace')
         
         # 1. 소켓 생성 - 서버와의 연결 통로
         s = socket.socket(
@@ -138,7 +157,16 @@ if __name__ == "__main__":
     # 명령줄 인자로 URL을 받음
     # 예: python lab1.py http://example.org/
     if len(sys.argv) > 1:
-        load(URL(sys.argv[1]))
+        raw = sys.argv[1]
+        # If user passed a plain filesystem path (no scheme) and it exists,
+        # convert it to a file:// URI so URL() can handle it.
+        if "://" not in raw:
+            if not os.path.exists(raw):
+                raise FileNotFoundError(f"File not found: {raw}")
+            uri = Path(raw).resolve().as_uri()
+        else:
+            uri = raw
+        load(URL(uri))
     else:
         # 기본 테스트 URL
-        load(URL("http://example.org/"))
+        load(URL("https://www.naver.com/"))
