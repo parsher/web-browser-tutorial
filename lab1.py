@@ -158,6 +158,7 @@ class URL:
 
         def read_chunked(rfile):
             chunks = []
+            trailers = {}
             while True:
                 # 청크 크기 라인 읽기
                 line = rfile.readline().decode("ascii")
@@ -171,20 +172,26 @@ class URL:
                 except ValueError:
                     raise Exception(f"Invalid chunk size: {size_str}")
                 if size == 0:
-                    # 트레일러 헤더(있다면) 읽고 종료
+                    # 트레일러 헤더(있다면) 읽기: 빈 줄 전까지 헤더 라인들
                     while True:
-                        trailer = rfile.readline().decode("utf8")
-                        if trailer in ("\r\n", "\n", ""):
+                        trailer_line = rfile.readline().decode("utf8")
+                        if trailer_line in ("\r\n", "\n", ""):
                             break
+                        if ":" in trailer_line:
+                            h, v = trailer_line.split(":", 1)
+                            trailers[h.casefold()] = v.strip()
                     break
                 data = rfile.read(size)
                 chunks.append(data)
                 # 청크 끝의 CRLF 소비
                 rfile.read(2)
-            return b"".join(chunks)
+            return b"".join(chunks), trailers
 
         if "chunked" in transfer_encoding:
-            body = read_chunked(response)
+            body, trailers = read_chunked(response)
+            # 트레일러 헤더를 응답 헤더에 병합 (기존 헤더를 덮어쓸 수 있음)
+            for k, v in trailers.items():
+                response_headers[k] = v
         else:
             if "content-length" in response_headers:
                 length = int(response_headers["content-length"])
