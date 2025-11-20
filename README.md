@@ -122,6 +122,9 @@ uv run lab1.py C:\Users\user\Projects\web-browser\README.md
 
 # ✅ 데이터 읽기
 uv run lab1.py "data:text/html, Hello world!"
+
+# ✅ 리다이렉트
+uv run lab1.py http://browser.engineering/redirect2
 ```
 
 ## 주요 개선사항
