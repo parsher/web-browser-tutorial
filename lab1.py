@@ -5,6 +5,7 @@ import zlib
 import brotli
 import os
 import base64
+import time
 from urllib.parse import urlparse, unquote, unquote_to_bytes, urljoin
 from pathlib import Path
 
@@ -14,6 +15,82 @@ class URL:
     
     # 클래스 변수: 소켓 캐시 (host:port를 키로 사용)
     _socket_cache = {}
+    
+    # 클래스 변수: 콘텐츠 캐시 {url: {body, headers, timestamp, max_age}}
+    _content_cache = {}
+    
+    # 캐시 가능한 파일 확장자
+    _CACHEABLE_EXTENSIONS = {
+        '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico',  # 이미지
+        '.css',  # 스타일
+        '.js', '.mjs',  # 스크립트
+        '.woff', '.woff2', '.ttf', '.eot',  # 폰트
+    }
+    
+    @staticmethod
+    def _is_cacheable(url_path):
+        """캐시 가능한 리소스인지 확인"""
+        ext = os.path.splitext(url_path.lower())[1]
+        return ext in URL._CACHEABLE_EXTENSIONS
+    
+    @staticmethod
+    def _parse_cache_control(cache_control_header):
+        """
+        Cache-Control 헤더 파싱
+        리턴: (no_store: bool, max_age: int or None)
+        """
+        if not cache_control_header:
+            return False, None
+        
+        directives = [d.strip().lower() for d in cache_control_header.split(',')]
+        no_store = False
+        max_age = None
+        
+        for directive in directives:
+            if directive == 'no-store':
+                no_store = True
+            elif directive.startswith('max-age='):
+                try:
+                    max_age = int(directive.split('=')[1])
+                except (ValueError, IndexError):
+                    pass
+        
+        return no_store, max_age
+    
+    @staticmethod
+    def _get_from_cache(full_url):
+        """캐시에서 데이터 가져오기 (만료 확인)"""
+        if full_url not in URL._content_cache:
+            return None
+        
+        cache_entry = URL._content_cache[full_url]
+        timestamp = cache_entry['timestamp']
+        max_age = cache_entry['max_age']
+        
+        # max_age가 없으면 영구 캐시
+        if max_age is None:
+            return cache_entry
+        
+        # max_age 확인
+        elapsed = time.time() - timestamp
+        if elapsed < max_age:
+            return cache_entry
+        else:
+            # 만료됨 - 캐시에서 제거
+            print(f"⏰ 캐시 만료: {full_url}")
+            del URL._content_cache[full_url]
+            return None
+    
+    @staticmethod
+    def _save_to_cache(full_url, body, headers, max_age):
+        """캐시에 데이터 저장"""
+        URL._content_cache[full_url] = {
+            'body': body,
+            'headers': headers,
+            'timestamp': time.time(),
+            'max_age': max_age
+        }
+        print(f"💾 캐시 저장: {full_url} (max-age: {max_age if max_age else 'unlimited'})")
     
     def __init__(self, url):
         # 더 안정적인 파싱을 위해 urllib.parse 사용
@@ -114,6 +191,19 @@ class URL:
                 data = f.read()
                 # '�� invalid utf8 �' 이처럼 변환이 됨, U+FFFD
             return data.decode('utf8', errors='replace')
+        
+        # HTTP/HTTPS 요청에 대한 캐시 처리
+        full_url = f"{self.scheme}://{self.host}{self.path}"
+        
+        # 캐시 가능한 리소스인지 확인
+        is_cacheable = URL._is_cacheable(self.path)
+        
+        # 캐시 확인
+        if is_cacheable:
+            cached = URL._get_from_cache(full_url)
+            if cached:
+                print(f"⚡ 캐시에서 반환: {full_url}")
+                return cached['body']
         
         # 1. 소켓 캐시 확인 및 재사용
         cache_key = f"{self.scheme}://{self.host}:{self.port}"
@@ -288,6 +378,17 @@ class URL:
         
         # 13. 바이트를 문자열로 변환
         body = body.decode("utf8", errors="replace")
+        
+        # 14. 캐시 저장 (200 OK 응답이고 캐시 가능한 리소스인 경우)
+        if status_code == 200 and is_cacheable:
+            cache_control = response_headers.get('cache-control', '')
+            no_store, max_age = URL._parse_cache_control(cache_control)
+            
+            if not no_store:
+                # no-store가 아니면 캐시에 저장
+                URL._save_to_cache(full_url, body, response_headers, max_age)
+            else:
+                print(f"🚫 캐시 금지 (no-store): {full_url}")
 
         # If we created the redirect_log in this call and there are entries,
         # print the redirect trace for non-view-source requests as well.
