@@ -125,6 +125,13 @@ uv run lab1.py "data:text/html, Hello world!"
 
 # ✅ 리다이렉트
 uv run lab1.py http://browser.engineering/redirect2
+
+# ✅ 대화형모드
+uv run lab1.py
+https://code.jquery.com/jquery-3.7.1.min.js
+
+# ✅ 대화형모드 종료
+quit
 ```
 
 ## 주요 개선사항
