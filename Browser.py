@@ -49,7 +49,7 @@ class Browser:
         new_width = event.width
         new_height = event.height
         self.canvas.config(width=new_width, height=new_height)
-        # self.canvas.config(scrollregion=(0, 0, new_width*2, new_height*2))
+        self.draw_content()
 
     def on_click(self, event):
         self.last_x = event.x
@@ -72,35 +72,51 @@ class Browser:
         # self.canvas.yview_scroll(-lines, 'units')
         self.scroll += SCROLL_STEP
         self.draw_content()
+
+    def getCanvasHeight(self):
+        canvas_height = self.canvas.winfo_height()
+        if canvas_height <= 1:
+            canvas_height = HEIGHT
+        return canvas_height
     
+    def getCanvasWidth(self):
+        canvas_width = self.canvas.winfo_width()
+        if canvas_width <= 1:
+            canvas_width = WIDTH
+        return canvas_width
+
     def layout(self, text):
         display_list = []
         cursor_x, cursor_y = HSTEP, VSETEP  # 시작 위치
+        canvas_width = self.getCanvasWidth()
         for c in text:
             display_list.append((cursor_x, cursor_y, c))
             cursor_x += HSTEP
-            if cursor_x >= WIDTH - HSTEP:
+            if cursor_x >= canvas_width - HSTEP:
                 cursor_x = HSTEP
                 cursor_y += VSETEP
         return display_list        
 
     def draw_content(self):
         self.canvas.delete("all")
+        canvas_height = self.getCanvasHeight()
         if self.current_text:
             # 스크롤 영역 안의 텍스트만 그리기
             for x, y, c in self.layout(self.current_text):
-                if y > self.scroll + HEIGHT: continue
+                if y > self.scroll + canvas_height: continue
                 if y + VSETEP < self.scroll: continue
                 self.canvas.create_text(x, y, text=c, anchor="nw", font=("Arial", 10), fill="black")
         else:
             self.draw_init_content()
     
     def draw_init_content(self):
-        for i in range(0, WIDTH, HSTEP):
-            self.canvas.create_line(i, 0, i, HEIGHT, fill="lightgray")
-        for j in range(0, HEIGHT, VSETEP):
-            self.canvas.create_line(0, j, WIDTH, j, fill="lightgray")
-        self.canvas.create_text(WIDTH//2, HEIGHT//2, text="Welcome to the Simple Browser!", font=("Arial", 24), fill="black")
+        canvas_width = self.getCanvasWidth()
+        canvas_height = self.getCanvasHeight()
+        for i in range(0, canvas_width, HSTEP):
+            self.canvas.create_line(i, 0, i, canvas_height, fill="lightgray")
+        for j in range(0, canvas_height, VSETEP):
+            self.canvas.create_line(0, j, canvas_width, j, fill="lightgray")
+        self.canvas.create_text(canvas_width//2, canvas_height//2, text="Welcome to the Simple Browser!", font=("Arial", 24), fill="black")
 
     @staticmethod
     def decode_text(body):
