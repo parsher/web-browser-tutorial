@@ -104,30 +104,30 @@ uv run python --version
 
 ```bash
 # ✅ 압축 없음 (단순 테스트)
-uv run lab1.py http://example.org/
-uv run lab1.py http://info.cern.ch/
+uv run cli.py http://example.org/
+uv run cli.py http://info.cern.ch/
 
 # ✅ gzip 압축
-uv run lab1.py https://www.wikipedia.org/
+uv run cli.py https://www.wikipedia.org/
 
 # ✅ brotli 압축
-uv run lab1.py https://www.google.com/
-uv run lab1.py https://www.naver.com/
+uv run cli.py https://www.google.com/
+uv run cli.py https://www.naver.com/
 
 # ✅ HTTPS + 압축
-uv run lab1.py https://browser.engineering/
+uv run cli.py https://browser.engineering/
 
 # ✅ 파일 읽기
-uv run lab1.py C:\Users\user\Projects\web-browser\README.md
+uv run cli.py C:\Users\user\Projects\web-browser\README.md
 
 # ✅ 데이터 읽기
-uv run lab1.py "data:text/html, Hello world!"
+uv run cli.py "data:text/html, Hello world!"
 
 # ✅ 리다이렉트
-uv run lab1.py http://browser.engineering/redirect2
+uv run cli.py http://browser.engineering/redirect2
 
 # ✅ 대화형모드
-uv run lab1.py
+uv run cli.py
 https://code.jquery.com/jquery-3.7.1.min.js
 
 # ✅ 대화형모드 종료
