@@ -88,6 +88,8 @@ class HTMLParser:
     def add_text(self, text):
         if text.isspace():
             return
+        # Ensure implicit tags (html/head/body) are present
+        self.implicit_tags(None)
         parent = self.unfinished[-1]
         node = Text(text, parent)
         parent.children.append(node)
@@ -97,10 +99,17 @@ class HTMLParser:
         "link", "meta", "param", "source", "track", "wbr",
     ]
 
+    HEAD_TAGS = [
+        "base", "basefont", "bgsound", "noscript",
+        "link", "meta", "title", "style", "script",
+    ]
+
     def add_tag(self, tag):
         tag, attributes = self.get_attributes(tag)
         if tag.startswith("!"): 
             return
+        # Insert any implicit ancestor/structure tags before handling this tag
+        self.implicit_tags(tag)
         if tag.startswith("/"):
             if len(self.unfinished) == 1:
                 return
@@ -117,11 +126,38 @@ class HTMLParser:
             self.unfinished.append(node)
 
     def finish(self):
+        # Ensure implicit root tags exist if nothing was opened
+        if not self.unfinished:
+            self.implicit_tags(None)
         while len(self.unfinished) > 1:
             node = self.unfinished.pop()
             parent = self.unfinished[-1]
             parent.children.append(node)
         return self.unfinished.pop()
+
+    def implicit_tags(self, tag):
+        """Auto-insert implicit structural tags like html/head/body.
+
+        Simple rules:
+        - If nothing is open and next tag isn't 'html', open 'html'.
+        - If only 'html' is open and next tag isn't 'head','body','/html',
+          open 'head' if next tag is a head tag, otherwise open 'body'.
+        - If 'html'->'head' is open and the next tag doesn't belong to head,
+          close 'head'.
+        """
+        while True:
+            open_tags = [node.tag for node in self.unfinished]
+            if open_tags == [] and tag != "html":
+                self.add_tag("html")
+            elif open_tags == ["html"] and tag not in ["head", "body", "/html"]:
+                if tag in self.HEAD_TAGS:
+                    self.add_tag("head")
+                else:
+                    self.add_tag("body")
+            elif open_tags == ["html", "head"] and tag not in ["/head"] + self.HEAD_TAGS:
+                self.add_tag("/head")
+            else:
+                break
 
 
 class Layout:
