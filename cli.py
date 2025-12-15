@@ -4,8 +4,59 @@ import sys
 import os
 from pathlib import Path
 from URL import URL
-from Browser import Browser
+from Browser import HTMLParser, Text
 
+def render_text(body: str) -> str:
+    """Convert an HTML/text body into a plain text representation.
+
+    This reuses the module's `HTMLParser` and `Text`/`Element` structure to
+    preserve basic semantics like paragraphs and line breaks without
+    instantiating the GUI `Browser` class.
+    """
+    try:
+        tree = HTMLParser(body).parse()
+    except Exception:
+        # fall back to raw body if parsing fails
+        return body
+
+    tokens = []
+
+    def walk(node):
+        # Text nodes: append their text
+        if isinstance(node, Text):
+            tokens.append(node.text)
+            return
+        # Element nodes: handle a few common tags
+        tag = getattr(node, 'tag', '').lower()
+        if tag == 'br':
+            tokens.append('\n')
+            return
+        if tag == 'p':
+            # collect paragraph children then add a paragraph break
+            for child in node.children:
+                walk(child)
+            tokens.append('\n\n')
+            return
+        # default: recurse into children
+        for child in node.children:
+            walk(child)
+
+    walk(tree)
+
+    # Join tokens preserving explicit newlines, avoid duplicate spaces
+    out = ''
+    for tok in tokens:
+        if tok == '\n' or tok == '\n\n':
+            out += tok
+        else:
+            # normalize whitespace inside token
+            piece = ' '.join(tok.split())
+            if not out or out.endswith('\n'):
+                out += piece
+            else:
+                out += ' ' + piece
+
+    return out.strip()
 
 def load(url):
     body = url.request()
@@ -13,7 +64,7 @@ def load(url):
     if getattr(url, 'scheme', None) == 'view-source':
         print(body)
     else:
-        print(Browser.decode_text(body))
+        print(render_text(body))
 
 
 def main():

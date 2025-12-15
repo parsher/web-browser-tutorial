@@ -8,6 +8,7 @@ import base64
 import time
 from urllib.parse import urlparse, unquote, unquote_to_bytes, urljoin
 from pathlib import Path
+import atexit
 
 
 class URL:
@@ -219,7 +220,17 @@ class URL:
             )
             
             # 2. 서버에 연결
-            s.connect((self.host, self.port))
+            try:
+                # set a sensible timeout for network operations
+                s.settimeout(10.0)
+                s.connect((self.host, self.port))
+            except Exception as e:
+                # Ensure socket not left in cache on failure
+                try:
+                    s.close()
+                except Exception:
+                    pass
+                raise Exception(f"Network error connecting to {self.host}:{self.port} - {e}")
             
             # 3. HTTPS인 경우 TLS로 암호화
             if self.scheme == "https":
@@ -246,7 +257,13 @@ class URL:
         s.send(request.encode("utf8"))
         
         # 6. 응답 받기 (바이너리로 읽어야 압축 해제 가능)
-        response = s.makefile("rb")
+        try:
+            response = s.makefile("rb")
+        except Exception as e:
+            if cache_key in URL._socket_cache:
+                del URL._socket_cache[cache_key]
+            s.close()
+            raise Exception(f"Failed to read response from {self.host}:{self.port} - {e}")
         
         # 7. 상태 라인 읽기 (예: "HTTP/1.0 200 OK")
         statusline = response.readline().decode("utf8")
@@ -398,6 +415,18 @@ class URL:
                 print(f" {i}. {src} -> {dst}")
 
         return body
+
+
+# Ensure sockets in the socket cache are closed on program exit
+def _close_socket_cache():
+    for key, s in list(URL._socket_cache.items()):
+        try:
+            s.close()
+        except Exception:
+            pass
+    URL._socket_cache.clear()
+
+atexit.register(_close_socket_cache)
 
 
 
