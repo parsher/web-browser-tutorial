@@ -53,23 +53,54 @@ class HTMLParser:
         self.unfinished = []
 
     def parse(self):
-        text = ""
-        in_tag = False
-        for c in self.body:
-            if c == "<":
-                in_tag = True
-                if text:
-                    self.add_text(text)
-                text = ""
-            elif c == ">":
-                in_tag = False
-                self.add_tag(text)
-                text = ""
-            else:
-                text += c
-        if not in_tag and text:
-            self.add_text(text)
+        # Tokenize first (lex) so we can cleanly handle comments
+        for typ, val in self.lex():
+            if typ == 'text':
+                self.add_text(val)
+            elif typ == 'tag':
+                self.add_tag(val)
         return self.finish()
+
+    def lex(self):
+        """A simple lexer yielding ('text', text) and ('tag', tagtext).
+
+        Comments (<!-- ... -->) are ignored — lex will not yield any token
+        for comment content so the parser creates no Text/Element for them.
+        """
+        i = 0
+        s = self.body
+        n = len(s)
+        buf = []
+        while i < n:
+            c = s[i]
+            if c == '<':
+                # flush text buffer
+                if buf:
+                    yield ('text', ''.join(buf))
+                    buf = []
+                # detect comment
+                if s.startswith('!--', i+1):
+                    # find closing -->
+                    end = s.find('-->', i+4)
+                    if end == -1:
+                        # unterminated comment — skip rest
+                        return
+                    i = end + 3
+                    continue
+                # otherwise find next '>'
+                end = s.find('>', i+1)
+                if end == -1:
+                    # malformed tag; treat rest as text
+                    buf.append(s[i:])
+                    break
+                tagtext = s[i+1:end]
+                yield ('tag', tagtext)
+                i = end + 1
+            else:
+                buf.append(c)
+                i += 1
+        if buf:
+            yield ('text', ''.join(buf))
 
     def get_attributes(self, text):
         parts = text.split()
@@ -284,6 +315,33 @@ class Browser:
 
 if __name__ == "__main__":
     import sys
+    # Allow a quick parser test: python Browser.py --test
+    def test_parser_comments():
+        samples = [
+            ("Hello <!-- skip this -->World", "Hello World"),
+            ("<meta charset=\"utf-8\"><p>Para<!--x-->Two</p>", "Para Two"),
+            ("<!-- full comment --><b>Bold</b>", "Bold"),
+        ]
+        for src, expect in samples:
+            p = HTMLParser(src)
+            tree = p.parse()
+            # collect text nodes
+            def collect(node):
+                out = []
+                if isinstance(node, Text):
+                    out.append(' '.join(node.text.split()))
+                for ch in getattr(node, 'children', []):
+                    out.append(collect(ch))
+                return ' '.join([x for x in out if x])
+            result = collect(tree)
+            print('SRC:', src)
+            print('PARSED TEXT:', result)
+            print('EXPECTED (approx):', expect)
+            print('---')
+
+    if len(sys.argv) > 1 and sys.argv[1] == '--test':
+        test_parser_comments()
+        sys.exit(0)
     b = Browser()
     if len(sys.argv) > 1:
         b.load(URL(sys.argv[1]))
