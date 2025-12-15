@@ -134,6 +134,8 @@ class HTMLParser:
         "base", "basefont", "bgsound", "noscript",
         "link", "meta", "title", "style", "script",
     ]
+    # Tags that should implicitly close when a sibling of the same tag opens
+    REOPEN_CLOSE_TAGS = ["p", "li", "div"]
 
     def add_tag(self, tag):
         tag, attributes = self.get_attributes(tag)
@@ -141,6 +143,14 @@ class HTMLParser:
             return
         # Insert any implicit ancestor/structure tags before handling this tag
         self.implicit_tags(tag)
+        # If a start-tag of a reopen-close family appears while the same
+        # tag is already the immediate open element, implicitly close the
+        # previous one (treat as sibling). Example: <p>one<p>two -> close
+        # first <p> before opening second.
+        if not tag.startswith("/") and tag in self.REOPEN_CLOSE_TAGS:
+            if self.unfinished and self.unfinished[-1].tag == tag:
+                # close previous
+                self.add_tag(f"/{tag}")
         if tag.startswith("/"):
             if len(self.unfinished) == 1:
                 return
