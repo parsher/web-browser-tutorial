@@ -48,11 +48,19 @@ class Element:
 
 
 class HTMLParser:
-    def __init__(self, body):
+    def __init__(self, body, view_source=False):
         self.body = body
         self.unfinished = []
+        self.view_source = view_source
+    
+    # Formatting tags that can be automatically closed/reopened for proper nesting
+    FORMATTING_TAGS = ["b", "i", "small", "big", "strong", "em", "u", "s", "sup", "sub"]
 
     def parse(self):
+        # view-source mode: convert HTML source to formatted HTML
+        if self.view_source:
+            return self.parse_view_source()
+        
         # Tokenize first (lex) so we can cleanly handle comments and scripts
         for typ, val in self.lex():
             if typ == 'text':
@@ -62,6 +70,46 @@ class HTMLParser:
             elif typ == 'script':
                 self.add_script(val)
         return self.finish()
+    
+    def parse_view_source(self):
+        """Parse HTML source for view-source display.
+        
+        Converts raw HTML into formatted HTML where:
+        - HTML tags are displayed in normal font
+        - Text content is displayed in bold
+        - Everything is wrapped in <pre> to preserve formatting
+        """
+        formatted_html = ['<html><body><pre>']
+        
+        for typ, val in self.lex():
+            if typ == 'text':
+                # Text content: make it bold and escape HTML entities
+                escaped = self.escape_html(val)
+                formatted_html.append(f'<b>{escaped}</b>')
+            elif typ == 'tag':
+                # Tag: display as-is with < > and escape inner content
+                escaped = self.escape_html(val)
+                formatted_html.append(f'&lt;{escaped}&gt;')
+            elif typ == 'script':
+                # Script content: treat as text (bold)
+                escaped = self.escape_html(val)
+                formatted_html.append(f'<b>{escaped}</b>')
+        
+        formatted_html.append('</pre></body></html>')
+        
+        # Parse the formatted HTML normally
+        formatted_source = ''.join(formatted_html)
+        parser = HTMLParser(formatted_source, view_source=False)
+        return parser.parse()
+    
+    def escape_html(self, text):
+        """Escape HTML special characters."""
+        return (text
+                .replace('&', '&amp;')
+                .replace('<', '&lt;')
+                .replace('>', '&gt;')
+                .replace('"', '&quot;')
+                .replace("'", '&#39;'))
 
     def lex(self):
         """A simple lexer yielding ('text', text), ('tag', tagtext), and ('script', scripttext).
@@ -200,7 +248,48 @@ class HTMLParser:
             if self.unfinished and self.unfinished[-1].tag == tag:
                 # close previous
                 self.add_tag(f"/{tag}")
+        
+        # Handle improperly nested formatting tags
+        # Example: <b>bold <i>both</b> italic</i> becomes <b>bold <i>both</i></b><i> italic</i>
         if tag.startswith("/"):
+            closing_tag = tag[1:]  # Remove the '/'
+            if closing_tag in self.FORMATTING_TAGS:
+                # Find the matching opening tag
+                found_idx = None
+                for i in range(len(self.unfinished) - 1, -1, -1):
+                    if self.unfinished[i].tag == closing_tag:
+                        found_idx = i
+                        break
+                
+                if found_idx is not None:
+                    # Found the matching opening tag
+                    # Close all formatting tags between found_idx and the end
+                    tags_to_reopen = []
+                    for i in range(len(self.unfinished) - 1, found_idx, -1):
+                        if self.unfinished[i].tag in self.FORMATTING_TAGS:
+                            tags_to_reopen.append((self.unfinished[i].tag, self.unfinished[i].attributes))
+                    
+                    # Close the formatting tags in reverse order
+                    for _ in range(len(tags_to_reopen)):
+                        if len(self.unfinished) > 1:
+                            node = self.unfinished.pop()
+                            parent = self.unfinished[-1]
+                            parent.children.append(node)
+                    
+                    # Close the target tag
+                    if len(self.unfinished) > 1 and self.unfinished[-1].tag == closing_tag:
+                        node = self.unfinished.pop()
+                        parent = self.unfinished[-1]
+                        parent.children.append(node)
+                    
+                    # Reopen the closed formatting tags
+                    for tag_name, attrs in reversed(tags_to_reopen):
+                        parent = self.unfinished[-1] if self.unfinished else None
+                        node = Element(tag_name, attrs, parent)
+                        self.unfinished.append(node)
+                    return
+            
+            # Normal closing tag handling
             if len(self.unfinished) == 1:
                 return
             node = self.unfinished.pop()
