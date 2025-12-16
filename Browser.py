@@ -53,19 +53,24 @@ class HTMLParser:
         self.unfinished = []
 
     def parse(self):
-        # Tokenize first (lex) so we can cleanly handle comments
+        # Tokenize first (lex) so we can cleanly handle comments and scripts
         for typ, val in self.lex():
             if typ == 'text':
                 self.add_text(val)
             elif typ == 'tag':
                 self.add_tag(val)
+            elif typ == 'script':
+                self.add_script(val)
         return self.finish()
 
     def lex(self):
-        """A simple lexer yielding ('text', text) and ('tag', tagtext).
+        """A simple lexer yielding ('text', text), ('tag', tagtext), and ('script', scripttext).
 
         Comments (<!-- ... -->) are ignored — lex will not yield any token
         for comment content so the parser creates no Text/Element for them.
+        
+        <script> tags are handled specially: content between <script> and </script>
+        is yielded as ('script', content) regardless of any < or > characters inside.
         """
         i = 0
         s = self.body
@@ -86,6 +91,33 @@ class HTMLParser:
                         # unterminated comment — skip rest
                         return
                     i = end + 3
+                    continue
+                # detect <script> tag
+                if s[i+1:i+7].lower() == 'script' and (i+7 >= n or s[i+7] in ' \t\n\r>'): 
+                    # find the closing '>' of opening <script> tag
+                    tag_end = s.find('>', i+1)
+                    if tag_end == -1:
+                        # malformed tag; treat rest as text
+                        buf.append(s[i:])
+                        break
+                    tagtext = s[i+1:tag_end]
+                    yield ('tag', tagtext)
+                    i = tag_end + 1
+                    
+                    # now find the closing </script>
+                    script_start = i
+                    script_end = s.find('</script>', i)
+                    if script_end == -1:
+                        # no closing tag, treat rest as script
+                        script_content = s[script_start:]
+                        yield ('script', script_content)
+                        return
+                    else:
+                        script_content = s[script_start:script_end]
+                        yield ('script', script_content)
+                        # yield closing </script> tag
+                        yield ('tag', '/script')
+                        i = script_end + len('</script>')
                     continue
                 # otherwise find next '>'
                 end = s.find('>', i+1)
@@ -124,6 +156,23 @@ class HTMLParser:
         parent = self.unfinished[-1]
         node = Text(text, parent)
         parent.children.append(node)
+    
+    def add_script(self, script_content):
+        """Handle JavaScript content from <script> tags.
+        
+        Currently stores the script content but does not execute it.
+        This function is a placeholder for future JavaScript execution.
+        
+        Args:
+            script_content: The JavaScript code as a string
+        """
+        # TODO: Implement JavaScript execution
+        # For now, we simply ignore the script content
+        # Future implementation could:
+        # 1. Parse JavaScript using a JS parser
+        # 2. Execute JavaScript in a sandboxed environment
+        # 3. Handle DOM manipulation from JavaScript
+        pass
 
     SELF_CLOSING_TAGS = [
         "area", "base", "br", "col", "embed", "hr", "img", "input",
