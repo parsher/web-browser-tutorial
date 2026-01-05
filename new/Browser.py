@@ -13,10 +13,23 @@ from typing import Dict, Optional, Tuple, List, Union
 # UI constants
 # -----------------------
 HSTEP = 13
+VSTEP = 18
 SCROLL_STEP = 100
 WIDTH, HEIGHT = 800, 600
 MAX_REDIRECTS = 10
 SOFT_HYPHEN = "\N{soft hyphen}"  # U+00AD
+
+# -----------------------
+# Chapter 5: block elements
+# -----------------------
+BLOCK_ELEMENTS = [
+    "html", "body", "article", "section", "nav", "aside",
+    "h1", "h2", "h3", "h4", "h5", "h6", "hgroup", "header",
+    "footer", "address", "p", "hr", "pre", "blockquote",
+    "ol", "ul", "menu", "li", "dl", "dt", "dd", "figure",
+    "figcaption", "main", "div", "table", "form", "fieldset",
+    "legend", "details", "summary",
+]
 
 # -----------------------
 # Networking response
@@ -313,7 +326,7 @@ class HTMLParser:
 
 
 # ============================================================
-# Chapter 3/4: Fonts + Layout (tree traversal + style stack)
+# Chapter 3/4: Fonts
 # ============================================================
 
 # Font cache
@@ -323,11 +336,51 @@ def get_font(size: int, weight: str, slant: str, family: str) -> tkinter.font.Fo
     key = (size, weight, slant, family)
     if key not in FONTS:
         font = tkinter.font.Font(size=size, weight=weight, slant=slant, family=family)
-        label = tkinter.Label(font=font)  # helps metrics perf on some systems :contentReference[oaicite:9]{index=9}
+        label = tkinter.Label(font=font)  # helps metrics perf on some systems
         FONTS[key] = (font, label)
     return FONTS[key][0]
 
-DisplayItem = Tuple[int, int, str, tkinter.font.Font]
+
+# ============================================================
+# Chapter 5: Paint commands (display list items)
+# ============================================================
+
+class DrawCommand:
+    top: int
+    bottom: int
+    def execute(self, scroll: int, canvas: tkinter.Canvas) -> None:
+        raise NotImplementedError
+
+class DrawText(DrawCommand):
+    def __init__(self, x: int, y: int, text: str, font: tkinter.font.Font):
+        self.left = x
+        self.top = y
+        self.text = text
+        self.font = font
+        self.bottom = y + font.metrics("linespace")
+
+    def execute(self, scroll: int, canvas: tkinter.Canvas) -> None:
+        canvas.create_text(self.left, self.top - scroll, text=self.text, font=self.font, anchor="nw")
+
+class DrawRect(DrawCommand):
+    def __init__(self, x1: int, y1: int, x2: int, y2: int, color: str):
+        self.left = x1
+        self.top = y1
+        self.right = x2
+        self.bottom = y2
+        self.color = color
+
+    def execute(self, scroll: int, canvas: tkinter.Canvas) -> None:
+        canvas.create_rectangle(
+            self.left, self.top - scroll,
+            self.right, self.bottom - scroll,
+            width=0, fill=self.color
+        )
+
+
+# ============================================================
+# Chapter 5: Styles (reused from chap4 layout)
+# ============================================================
 
 @dataclass(frozen=True)
 class Style:
@@ -347,26 +400,34 @@ class LineItem:
     font: tkinter.font.Font
     is_sup: bool = False
 
-class Layout:
+
+# ============================================================
+# Chapter 5: Inline layout helper (per block)
+# ============================================================
+
+class InlineLayout:
     """
-    Tree-based layout: recursively walk the HTML tree and lay out text nodes.
-    Formatting tags change the style stack (nested tags behave correctly).
+    Lays out inline text inside a single block, producing DrawText commands.
+    Coordinates are relative to (x, y) passed in, but commands are stored in absolute coords.
     """
-    def __init__(self, tree: Element, width: int):
-        self.tree = tree
+    def __init__(self, node: Node, x: int, y: int, width: int):
+        self.node = node
+        self.x = x
+        self.y = y
         self.width = max(width, 1)
-        self.display_list: List[DisplayItem] = []
 
         self.style_stack: List[Style] = [Style()]
 
         self.line: List[LineItem] = []
         self.line_width = 0
         self.cursor_y = 0
-        self.document_height = HEIGHT
 
-        self.recurse(tree)
+        self.commands: List[DrawCommand] = []
+
+        self.recurse(node)
         self.flush_line(paragraph_gap=False)
-        self.document_height = max(self.cursor_y + 50, HEIGHT)
+
+        self.height = max(self.cursor_y, 0)
 
     @property
     def style(self) -> Style:
@@ -386,7 +447,8 @@ class Layout:
                 return
 
     def word_fits(self, w: int) -> bool:
-        return (HSTEP + self.line_width + w) <= (self.width - HSTEP)
+        # Relative widths inside this block
+        return (self.line_width + w) <= self.width
 
     def push_piece(self, text: str, font: tkinter.font.Font, is_sup: bool) -> None:
         self.line.append(LineItem(text=text, font=font, is_sup=is_sup))
@@ -412,18 +474,20 @@ class Layout:
         baseline = self.cursor_y + max_ascent
 
         if self.style.center:
-            start_x = max((self.width - self.line_width) // 2, HSTEP)
+            start_x = max((self.width - self.line_width) // 2, 0)
         else:
-            start_x = HSTEP
+            start_x = 0
 
-        x = start_x
+        rel_x = start_x
         for it in self.line:
             ascent = it.font.metrics("ascent")
             y_top = baseline - ascent
             if it.is_sup:
                 y_top = baseline - ref_ascent
-            self.display_list.append((x, y_top, it.text, it.font))
-            x += it.font.measure(it.text)
+            abs_x = self.x + rel_x
+            abs_y = self.y + y_top
+            self.commands.append(DrawText(abs_x, abs_y, it.text, it.font))
+            rel_x += it.font.measure(it.text)
 
         self.cursor_y = baseline + max_descent
         if paragraph_gap:
@@ -559,12 +623,9 @@ class Layout:
     def open_element(self, elt: Element) -> None:
         tag = elt.tag
 
-        # block-ish controls
+        # inline controls
         if tag == "br":
             self.flush_line(paragraph_gap=False)
-            return
-        if tag == "p":
-            self.flush_line(paragraph_gap=True)
             return
 
         # formatting
@@ -581,32 +642,153 @@ class Layout:
         elif tag == "abbr":
             self.push_style(in_abbr=True, tag="abbr")
         elif tag == "pre":
-            self.flush_line(paragraph_gap=True)
             self.push_style(in_pre=True, family="Courier New", tag="pre")
         elif tag == "h1" and elt.attributes.get("class", "") == "title":
-            self.flush_line(paragraph_gap=True)
             self.push_style(center=True, size=24, weight="bold", tag="h1-title")
         else:
-            # other tags ignored in this chapter
             pass
 
     def close_element(self, elt: Element) -> None:
         tag = elt.tag
-        if tag in ("br", "p"):
-            return
+
         if tag == "h1" and elt.attributes.get("class", "") == "title":
-            self.flush_line(paragraph_gap=True)
+            self.flush_line(paragraph_gap=False)
             self.pop_style_to_tag("h1-title")
             return
+
         if tag in ("b", "i", "small", "big", "sup", "abbr"):
             self.pop_style_to_tag(tag)
         elif tag == "pre":
-            self.flush_line(paragraph_gap=True)
+            self.flush_line(paragraph_gap=False)
             self.pop_style_to_tag("pre")
 
 
 # ============================================================
-# Browser (ch1 networking + ch2 GUI + ch3/4 layout)
+# Chapter 5: Layout tree (DocumentLayout + BlockLayout)
+# ============================================================
+
+class DocumentLayout:
+    def __init__(self, node: Element, viewport_width: int, viewport_height: int):
+        self.node = node
+        self.parent = None
+        self.children: List["BlockLayout"] = []
+        self.x = HSTEP
+        self.y = VSTEP
+        self.width = max(viewport_width - 2 * HSTEP, 1)
+        self.height = max(viewport_height, 1)
+
+    def layout(self) -> None:
+        child = BlockLayout(self.node, self, previous=None)
+        self.children = [child]
+        child.layout()
+        self.height = child.height
+
+    def paint(self) -> List[DrawCommand]:
+        return []
+
+class BlockLayout:
+    def __init__(self, node: Node, parent: Union["DocumentLayout", "BlockLayout"], previous: Optional["BlockLayout"]):
+        self.node = node
+        self.parent = parent
+        self.previous = previous
+
+        self.children: List["BlockLayout"] = []
+
+        self.x = 0
+        self.y = 0
+        self.width = 0
+        self.height = 0
+
+        # for inline mode
+        self.inline: Optional[InlineLayout] = None
+
+    def layout_mode(self) -> str:
+        if isinstance(self.node, Text):
+            return "inline"
+        assert isinstance(self.node, Element)
+
+        # If any child is a block element, this is block mode.
+        for child in self.node.children:
+            if isinstance(child, Element) and child.tag in BLOCK_ELEMENTS:
+                return "block"
+
+        # Otherwise, if it has children, inline mode (text flow).
+        if self.node.children:
+            return "inline"
+        return "block"
+
+    def layout(self) -> None:
+        # Position/width come from parent & previous sibling
+        self.x = self.parent.x
+        self.width = self.parent.width
+
+        if self.previous:
+            self.y = self.previous.y + self.previous.height
+        else:
+            self.y = self.parent.y
+
+        mode = self.layout_mode()
+
+        if mode == "block":
+            prev = None
+            for child in self.node.children:
+                # Skip pure whitespace text nodes in block flow to avoid creating empty blocks
+                if isinstance(child, Text) and not child.text.strip():
+                    continue
+                nxt = BlockLayout(child, self, previous=prev)
+                self.children.append(nxt)
+                prev = nxt
+
+            for c in self.children:
+                c.layout()
+
+            self.height = sum(c.height for c in self.children)
+
+        else:
+            # Inline mode: lay out all text inside this node.
+            self.inline = InlineLayout(self.node, x=self.x, y=self.y, width=self.width)
+            self.height = self.inline.height
+
+        # Simple vertical spacing for some block types (keeps chap4 feel)
+        if isinstance(self.node, Element):
+            if self.node.tag == "p":
+                self.height += 12
+            elif self.node.tag == "pre":
+                self.height += 12
+            elif self.node.tag == "h1" and self.node.attributes.get("class", "") == "title":
+                self.height += 16
+
+        # Ensure non-negative
+        if self.height < 0:
+            self.height = 0
+
+    def paint(self) -> List[DrawCommand]:
+        cmds: List[DrawCommand] = []
+
+        # Background for <pre>
+        if isinstance(self.node, Element) and self.node.tag == "pre":
+            cmds.append(DrawRect(
+                self.x,
+                self.y,
+                self.x + self.width,
+                self.y + self.height,
+                "gray"
+            ))
+
+        if self.inline is not None:
+            cmds.extend(self.inline.commands)
+
+        return cmds
+
+
+def paint_tree(layout_obj: Union[DocumentLayout, BlockLayout], out: List[DrawCommand]) -> None:
+    out.extend(layout_obj.paint())
+    for child in getattr(layout_obj, "children", []):
+        paint_tree(child, out)
+
+
+# ============================================================
+# Browser (ch1 networking + ch2 GUI + ch5 layout)
 # ============================================================
 
 class Browser:
@@ -625,7 +807,8 @@ class Browser:
         self.current_url: Optional[str] = None
 
         self.tree: Optional[Element] = None
-        self.display_list: List[DisplayItem] = []
+        self.display_list: List[DrawCommand] = []
+        self.document: Optional[DocumentLayout] = None
 
         self.window.bind("<Down>", lambda e: self.scroll_by(+SCROLL_STEP))
         self.window.bind("<Up>", lambda e: self.scroll_by(-SCROLL_STEP))
@@ -649,7 +832,7 @@ class Browser:
         body_text = self.decode_text(resp)
 
         if resp.url.view_source:
-            # Build the DOM directly so we render every character literally (no escaping/decoding)
+            # Render source literally
             root = Element("html", {}, None)
             body = Element("body", {}, root)
             pre = Element("pre", {}, body)
@@ -659,8 +842,6 @@ class Browser:
             self.tree = root
         else:
             body_text = self.decode_entities(body_text)
-
-            # Chapter 4: parse into a tree
             self.tree = HTMLParser(body_text).parse()
 
         self.relayout()
@@ -671,20 +852,25 @@ class Browser:
         w = max(self.canvas.winfo_width(), 1)
         h = max(self.canvas.winfo_height(), 1)
         assert self.tree is not None
-        layout_obj = Layout(self.tree, width=w)
-        self.display_list = layout_obj.display_list
-        self.doc_height = max(layout_obj.document_height, h)
+
+        self.document = DocumentLayout(self.tree, viewport_width=w, viewport_height=h)
+        self.document.layout()
+
+        self.display_list = []
+        paint_tree(self.document, self.display_list)
+
+        self.doc_height = max(self.document.height + 2 * VSTEP, h)
 
     def draw(self) -> None:
         self.canvas.delete("all")
         h = max(self.canvas.winfo_height(), 1)
 
-        for x, y, text, font in self.display_list:
-            if y > self.scroll + h:
+        for cmd in self.display_list:
+            if cmd.top > self.scroll + h:
                 continue
-            if y + font.metrics("linespace") < self.scroll:
+            if cmd.bottom < self.scroll:
                 continue
-            self.canvas.create_text(x, y - self.scroll, text=text, font=font, anchor="nw")
+            cmd.execute(self.scroll, self.canvas)
 
         self.clamp_scroll()
 
@@ -769,7 +955,7 @@ class Browser:
 
         headers = {
             "Host": url.host,
-            "User-Agent": "toy-browser/4.0 (WebBrowserEngineering)",
+            "User-Agent": "toy-browser/5.0 (WebBrowserEngineering)",
             "Connection": "keep-alive",
             "Accept-Encoding": "gzip",
         }
