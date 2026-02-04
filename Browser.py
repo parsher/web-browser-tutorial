@@ -598,6 +598,47 @@ def get_font(size: int, weight: str, slant: str, family: str = "Times") -> tkint
 
 
 # ============================================================
+# Helper: Parse font properties safely
+# ============================================================
+
+def parse_font_size(font_size_str: str) -> int:
+    """Parse CSS font-size value to integer pixels, handling edge cases."""
+    if not font_size_str:
+        return 12  # default
+    # Handle CSS variables or invalid values
+    if font_size_str.startswith("var") or not font_size_str.endswith("px"):
+        return 12  # default
+    try:
+        return int(float(font_size_str[:-2]) * 0.75)
+    except (ValueError, TypeError):
+        return 12  # default
+
+
+def parse_font_weight(weight_str: str) -> str:
+    """Parse CSS font-weight value, handling edge cases."""
+    if not weight_str or weight_str.startswith("var"):
+        return "normal"
+    # Accept only valid Tk font weights
+    if weight_str in ("normal", "bold"):
+        return weight_str
+    # Map numeric weights
+    try:
+        w = int(weight_str)
+        return "bold" if w >= 600 else "normal"
+    except (ValueError, TypeError):
+        return "normal"
+
+
+def parse_font_style(style_str: str) -> str:
+    """Parse CSS font-style value, handling edge cases."""
+    if not style_str or style_str.startswith("var"):
+        return "roman"
+    if style_str == "italic" or style_str == "oblique":
+        return "italic"
+    return "roman"
+
+
+# ============================================================
 # Chapter 7: Rect utility class
 # ============================================================
 
@@ -633,10 +674,18 @@ class DrawText:
         return self.rect.bottom
 
     def execute(self, scroll: float, canvas: tkinter.Canvas) -> None:
-        canvas.create_text(
-            self.rect.left, self.rect.top - scroll,
-            text=self.text, font=self.font, anchor="nw", fill=self.color
-        )
+        # Skip invalid colors (e.g., CSS variables like "var")
+        color = self.color if self.color and not self.color.startswith("var") else "black"
+        try:
+            canvas.create_text(
+                self.rect.left, self.rect.top - scroll,
+                text=self.text, font=self.font, anchor="nw", fill=color
+            )
+        except tkinter.TclError:
+            canvas.create_text(
+                self.rect.left, self.rect.top - scroll,
+                text=self.text, font=self.font, anchor="nw", fill="black"
+            )
 
 
 class DrawRect:
@@ -653,11 +702,17 @@ class DrawRect:
         return self.rect.bottom
 
     def execute(self, scroll: float, canvas: tkinter.Canvas) -> None:
-        canvas.create_rectangle(
-            self.rect.left, self.rect.top - scroll,
-            self.rect.right, self.rect.bottom - scroll,
-            width=0, fill=self.color
-        )
+        # Skip invalid colors (e.g., CSS variables like "var")
+        if not self.color or self.color.startswith("var"):
+            return
+        try:
+            canvas.create_rectangle(
+                self.rect.left, self.rect.top - scroll,
+                self.rect.right, self.rect.bottom - scroll,
+                width=0, fill=self.color
+            )
+        except tkinter.TclError:
+            pass  # Skip invalid colors
 
 
 class DrawLine:
@@ -675,11 +730,15 @@ class DrawLine:
         return self.rect.bottom
 
     def execute(self, scroll: float, canvas: tkinter.Canvas) -> None:
-        canvas.create_line(
-            self.rect.left, self.rect.top - scroll,
-            self.rect.right, self.rect.bottom - scroll,
-            fill=self.color, width=self.thickness
-        )
+        color = self.color if self.color and not self.color.startswith("var") else "black"
+        try:
+            canvas.create_line(
+                self.rect.left, self.rect.top - scroll,
+                self.rect.right, self.rect.bottom - scroll,
+                fill=color, width=self.thickness
+            )
+        except tkinter.TclError:
+            pass
 
 
 class DrawOutline:
@@ -697,11 +756,15 @@ class DrawOutline:
         return self.rect.bottom
 
     def execute(self, scroll: float, canvas: tkinter.Canvas) -> None:
-        canvas.create_rectangle(
-            self.rect.left, self.rect.top - scroll,
-            self.rect.right, self.rect.bottom - scroll,
-            width=self.thickness, outline=self.color
-        )
+        color = self.color if self.color and not self.color.startswith("var") else "black"
+        try:
+            canvas.create_rectangle(
+                self.rect.left, self.rect.top - scroll,
+                self.rect.right, self.rect.bottom - scroll,
+                width=self.thickness, outline=color
+            )
+        except tkinter.TclError:
+            pass
 
 
 # ============================================================
@@ -722,12 +785,13 @@ class TextLayout:
         self.font: Optional[tkinter.font.Font] = None
 
     def layout(self) -> None:
-        weight = self.node.style["font-weight"]
-        style_val = self.node.style["font-style"]
-        if style_val == "normal":
-            style_val = "roman"
-        size = int(float(self.node.style["font-size"][:-2]) * 0.75)
+        weight = parse_font_weight(self.node.style.get("font-weight", "normal"))
+        style_val = parse_font_style(self.node.style.get("font-style", "normal"))
+        size = parse_font_size(self.node.style.get("font-size", "16px"))
         family = self.node.style.get("font-family", "Times")
+        # Sanitize family name
+        if family.startswith("var"):
+            family = "Times"
         self.font = get_font(size, weight, style_val, family)
 
         self.width = self.font.measure(self.word)
@@ -741,7 +805,7 @@ class TextLayout:
         self.height = self.font.metrics("linespace")
 
     def paint(self) -> List[DrawText]:
-        color = self.node.style["color"]
+        color = self.node.style.get("color", "black")
         return [DrawText(self.x, self.y, self.word, self.font, color)]
 
 
@@ -882,12 +946,13 @@ class BlockLayout:
         self.children.append(new_line)
 
     def word(self, node: Node, word: str) -> None:
-        weight = node.style["font-weight"]
-        style_val = node.style["font-style"]
-        if style_val == "normal":
-            style_val = "roman"
-        size = int(float(node.style["font-size"][:-2]) * 0.75)
+        weight = parse_font_weight(node.style.get("font-weight", "normal"))
+        style_val = parse_font_style(node.style.get("font-style", "normal"))
+        size = parse_font_size(node.style.get("font-size", "16px"))
         family = node.style.get("font-family", "Times")
+        # Sanitize family name
+        if family.startswith("var"):
+            family = "Times"
         font = get_font(size, weight, style_val, family)
 
         w = font.measure(word)
@@ -936,6 +1001,7 @@ class Tab:
     def load(self, url: URL) -> None:
         self.url = url
         self.history.append(url)
+        self.scroll = 0  # Reset scroll position for new page
         body = self.browser.fetch_url(url)
         body = self.browser.decode_entities(body)
         self.nodes = HTMLParser(body).parse()
