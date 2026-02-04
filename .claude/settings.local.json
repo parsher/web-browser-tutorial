@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:browser.engineering)",
+      "Bash(curl:*)",
+      "Bash(uv run python:*)",
+      "Bash(timeout 3 cat:*)"
+    ]
+  }
+}

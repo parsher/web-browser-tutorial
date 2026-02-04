@@ -42,6 +42,17 @@ INHERITED_PROPERTIES = {
     "font-family": "Times",
 }
 
+# -----------------------
+# Default stylesheet
+# -----------------------
+DEFAULT_STYLE_SHEET_TEXT = """
+    pre { background-color: gray; }
+    a { color: blue; }
+    i { font-style: italic; }
+    b { font-weight: bold; }
+    small { font-size: 90%; }
+    big { font-size: 110%; }
+"""
 
 
 # ============================================================
@@ -155,18 +166,18 @@ class TagSelector:
         self.tag = tag
         self.priority = 1
 
-    def matches(self, node: Node) -> bool:
+    def matches(self, node: "Node") -> bool:
         return isinstance(node, Element) and self.tag == node.tag
 
 
 class DescendantSelector:
-    def __init__(self, ancestor: Union[TagSelector, "DescendantSelector"], 
+    def __init__(self, ancestor: Union[TagSelector, "DescendantSelector"],
                  descendant: TagSelector):
         self.ancestor = ancestor
         self.descendant = descendant
         self.priority = ancestor.priority + descendant.priority
 
-    def matches(self, node: Node) -> bool:
+    def matches(self, node: "Node") -> bool:
         if not self.descendant.matches(node):
             return False
         while node.parent:
@@ -186,7 +197,7 @@ def cascade_priority(rule: Tuple[Union[TagSelector, DescendantSelector], Dict[st
     return selector.priority
 
 
-def style(node: Node, rules: List[Tuple[Union[TagSelector, DescendantSelector], Dict[str, str]]]) -> None:
+def style(node: "Node", rules: List[Tuple[Union[TagSelector, DescendantSelector], Dict[str, str]]]) -> None:
     """Apply CSS styles to node tree"""
     # Set inherited properties
     for property, default_value in INHERITED_PROPERTIES.items():
@@ -235,7 +246,7 @@ class Response:
     body: bytes
 
 # -----------------------
-# URL (ch1/ch2 essentials)
+# URL (ch1/ch2 essentials + ch7 __str__)
 # -----------------------
 class URL:
     def __init__(self, url: str):
@@ -282,15 +293,11 @@ class URL:
         elif self.scheme == "file":
             # Windows 경로 처리 개선
             if rest.startswith("/") and len(rest) > 1 and rest[1] != "/":
-                # Unix-style path or Windows path starting with /
                 import os
                 if os.name == 'nt':  # Windows
-                    # /C:/... or /./... 형태를 처리
                     if len(rest) > 2 and rest[2] == ':':
-                        # /C:/path 형태
                         self.path = rest[1:]
                     elif rest.startswith("/./"):
-                        # /./path 형태 - 상대 경로
                         self.path = rest[2:]
                     else:
                         self.path = rest
@@ -305,6 +312,21 @@ class URL:
             meta, payload = rest.split(",", 1)
             self.data_payload = payload
             self.data_mime = (meta.split(";", 1)[0] or "text/plain") if meta else "text/plain"
+
+    # Chapter 7: String representation for address bar
+    def __str__(self) -> str:
+        if self.scheme == "about":
+            return "about:blank"
+        if self.scheme == "data":
+            return f"data:{self.data_mime},{self.data_payload[:20]}..."
+        if self.scheme == "file":
+            return f"file://{self.path}"
+        port_part = ":" + str(self.port)
+        if self.scheme == "https" and self.port == 443:
+            port_part = ""
+        if self.scheme == "http" and self.port == 80:
+            port_part = ""
+        return self.scheme + "://" + self.host + port_part + self.path
 
     def cache_key(self) -> str:
         if self.scheme in ["http", "https"]:
@@ -322,24 +344,24 @@ class URL:
         """Convert relative URLs to absolute URLs"""
         if "://" in url:
             return URL(url)
-        
+
         # Scheme-relative URL (starts with //)
         if url.startswith("//"):
             return URL(self.scheme + ":" + url)
-        
+
         # Host-relative URL (starts with /)
         if url.startswith("/"):
             return URL(f"{self.scheme}://{self.host}:{self.port}{url}")
-        
+
         # Path-relative URL
         dir_path, _ = self.path.rsplit("/", 1)
-        
+
         # Handle parent directory (..)
         while url.startswith("../"):
             _, url = url.split("/", 1)
             if "/" in dir_path:
                 dir_path, _ = dir_path.rsplit("/", 1)
-        
+
         return URL(f"{self.scheme}://{self.host}:{self.port}{dir_path}/{url}")
 
 
@@ -451,9 +473,6 @@ class HTMLParser:
             self.add_text(text)
         return self.finish()
 
-    # ---------------------------
-    # Attribute parsing (4-3/4-4)
-    # ---------------------------
     def get_attributes(self, text: str):
         parts = text.split(None, 1)
         if not parts:
@@ -470,7 +489,6 @@ class HTMLParser:
             if i >= n:
                 break
 
-            # Skip unexpected leading characters to avoid getting stuck
             if not (rest[i].isalnum() or rest[i] in "-_:"):
                 i += 1
                 continue
@@ -507,9 +525,6 @@ class HTMLParser:
                 attrs[key] = val
         return tag, attrs
 
-    # ---------------------------
-    # Tree construction helpers
-    # ---------------------------
     def add_text(self, text: str):
         if not text.strip():
             return
@@ -523,7 +538,6 @@ class HTMLParser:
         tag, attrs = self.get_attributes(text)
         self.implicit_tags(tag)
 
-        # ---------- closing tag (4-6) ----------
         if tag.startswith("/"):
             name = tag[1:]
             for i in range(len(self.unfinished) - 1, 0, -1):
@@ -534,13 +548,11 @@ class HTMLParser:
                     return
             return
 
-        # ---------- self closing ----------
         if tag in self.SELF_CLOSING_TAGS:
             parent = self.unfinished[-1]
             parent.children.append(Element(tag, attrs, parent))
             return
 
-        # ---------- opening ----------
         parent = self.unfinished[-1]
         self.unfinished.append(Element(tag, attrs, parent))
 
@@ -560,6 +572,9 @@ class HTMLParser:
                 break
 
     def finish(self):
+        # Handle empty document
+        if not self.unfinished:
+            self.implicit_tags(None)
         while len(self.unfinished) > 1:
             node = self.unfinished.pop()
             self.unfinished[-1].children.append(node)
@@ -573,399 +588,257 @@ class HTMLParser:
 # Font cache
 FONTS: Dict[Tuple[int, str, str, str], Tuple[tkinter.font.Font, tkinter.Label]] = {}
 
-def get_font(size: int, weight: str, slant: str, family: str) -> tkinter.font.Font:
+def get_font(size: int, weight: str, slant: str, family: str = "Times") -> tkinter.font.Font:
     key = (size, weight, slant, family)
     if key not in FONTS:
         font = tkinter.font.Font(size=size, weight=weight, slant=slant, family=family)
-        label = tkinter.Label(font=font)  # helps metrics perf on some systems
+        label = tkinter.Label(font=font)
         FONTS[key] = (font, label)
     return FONTS[key][0]
 
 
 # ============================================================
-# Chapter 5: Paint commands (display list items)
+# Chapter 7: Rect utility class
 # ============================================================
 
-class DrawCommand:
-    top: int
-    bottom: int
-    def execute(self, scroll: int, canvas: tkinter.Canvas) -> None:
-        raise NotImplementedError
+class Rect:
+    def __init__(self, left: float, top: float, right: float, bottom: float):
+        self.left = left
+        self.top = top
+        self.right = right
+        self.bottom = bottom
 
-class DrawText(DrawCommand):
-    def __init__(self, x: int, y: int, text: str, font: tkinter.font.Font, color: str):
-        self.left = x
-        self.top = y
+    def contains_point(self, x: float, y: float) -> bool:
+        return x >= self.left and x < self.right \
+            and y >= self.top and y < self.bottom
+
+
+# ============================================================
+# Chapter 5/7: Paint commands (display list items)
+# ============================================================
+
+class DrawText:
+    def __init__(self, x1: float, y1: float, text: str, font: tkinter.font.Font, color: str):
+        self.rect = Rect(x1, y1, x1 + font.measure(text), y1 + font.metrics("linespace"))
         self.text = text
         self.font = font
-        self.color = color  # Chapter 6: add color
-        self.bottom = y + font.metrics("linespace")
-
-    def execute(self, scroll: int, canvas: tkinter.Canvas) -> None:
-        canvas.create_text(self.left, self.top - scroll, text=self.text, font=self.font, anchor="nw", fill=self.color)
-
-class DrawRect(DrawCommand):
-    def __init__(self, x1: int, y1: int, x2: int, y2: int, color: str):
-        self.left = x1
-        self.top = y1
-        self.right = x2
-        self.bottom = y2
         self.color = color
 
-    def execute(self, scroll: int, canvas: tkinter.Canvas) -> None:
+    @property
+    def top(self) -> float:
+        return self.rect.top
+
+    @property
+    def bottom(self) -> float:
+        return self.rect.bottom
+
+    def execute(self, scroll: float, canvas: tkinter.Canvas) -> None:
+        canvas.create_text(
+            self.rect.left, self.rect.top - scroll,
+            text=self.text, font=self.font, anchor="nw", fill=self.color
+        )
+
+
+class DrawRect:
+    def __init__(self, rect: Rect, color: str):
+        self.rect = rect
+        self.color = color
+
+    @property
+    def top(self) -> float:
+        return self.rect.top
+
+    @property
+    def bottom(self) -> float:
+        return self.rect.bottom
+
+    def execute(self, scroll: float, canvas: tkinter.Canvas) -> None:
         canvas.create_rectangle(
-            self.left, self.top - scroll,
-            self.right, self.bottom - scroll,
+            self.rect.left, self.rect.top - scroll,
+            self.rect.right, self.rect.bottom - scroll,
             width=0, fill=self.color
         )
 
 
-# ============================================================
-# Chapter 5: Styles (reused from chap4 layout)
-# ============================================================
-
-@dataclass(frozen=True)
-class Style:
-    size: int = 16
-    weight: str = "normal"
-    slant: str = "roman"
-    family: str = "Times"
-    center: bool = False
-    in_sup: bool = False
-    in_abbr: bool = False
-    in_pre: bool = False
-    tag: Optional[str] = None
-
-@dataclass
-class LineItem:
-    text: str
-    font: tkinter.font.Font
-    color: str  # Chapter 6: add color
-    is_sup: bool = False
-
-# ============================================================
-# Chapter 5: Inline layout helper (per block)
-# ============================================================
-
-class InlineLayout:
-    """
-    Lays out inline text inside a single block, producing DrawText commands.
-    Coordinates are relative to (x, y) passed in, but commands are stored in absolute coords.
-    """
-    def __init__(self, node: Node, x: int, y: int, width: int):
-        self.node = node
-        self.x = x
-        self.y = y
-        self.width = max(width, 1)
-
-        self.style_stack: List[Style] = [Style()]
-
-        self.line: List[LineItem] = []
-        self.line_width = 0
-        self.cursor_y = 0
-
-        self.commands: List[DrawCommand] = []
-
-        self.recurse(node)
-        self.flush_line(paragraph_gap=False)
-
-        self.height = max(self.cursor_y, 0)
+class DrawLine:
+    def __init__(self, x1: float, y1: float, x2: float, y2: float, color: str, thickness: int):
+        self.rect = Rect(x1, y1, x2, y2)
+        self.color = color
+        self.thickness = thickness
 
     @property
-    def style(self) -> Style:
-        return self.style_stack[-1]
+    def top(self) -> float:
+        return self.rect.top
 
-    def current_font(self) -> tkinter.font.Font:
-        s = self.style
-        return get_font(s.size, s.weight, s.slant, s.family)
+    @property
+    def bottom(self) -> float:
+        return self.rect.bottom
 
-    def push_style(self, **changes) -> None:
-        self.style_stack.append(replace(self.style, **changes))
+    def execute(self, scroll: float, canvas: tkinter.Canvas) -> None:
+        canvas.create_line(
+            self.rect.left, self.rect.top - scroll,
+            self.rect.right, self.rect.bottom - scroll,
+            fill=self.color, width=self.thickness
+        )
 
-    def pop_style_to_tag(self, tagname: str) -> None:
-        for i in range(len(self.style_stack) - 1, 0, -1):
-            if self.style_stack[i].tag == tagname:
-                del self.style_stack[i:]
-                return
 
-    def word_fits(self, w: int) -> bool:
-        # Relative widths inside this block
-        return (self.line_width + w) <= self.width
-    
-    def push_piece(self, text: str, font: tkinter.font.Font, color: str, is_sup: bool) -> None:
-        self.line.append(LineItem(text=text, font=font, color=color, is_sup=is_sup))
-        self.line_width += font.measure(text)
+class DrawOutline:
+    def __init__(self, rect: Rect, color: str, thickness: int):
+        self.rect = rect
+        self.color = color
+        self.thickness = thickness
 
-    def push_space(self, font: tkinter.font.Font, color: str) -> None:
-        self.push_piece(" ", font, color, is_sup=False)
+    @property
+    def top(self) -> float:
+        return self.rect.top
 
-    def flush_line(self, paragraph_gap: bool) -> None:
-        if not self.line:
-            if paragraph_gap:
-                self.cursor_y += 20
-            return
+    @property
+    def bottom(self) -> float:
+        return self.rect.bottom
 
-        ascents = [it.font.metrics("ascent") for it in self.line]
-        max_ascent = max(ascents) if ascents else 0
-        max_descent = max(it.font.metrics("descent") for it in self.line) if self.line else 0
-
-        non_sup_ascents = [it.font.metrics("ascent") for it in self.line if not it.is_sup]
-        ref_ascent = max(non_sup_ascents) if non_sup_ascents else max_ascent
-
-        baseline = self.cursor_y + max_ascent
-
-        if self.style.center:
-            start_x = max((self.width - self.line_width) // 2, 0)
-        else:
-            start_x = 0
-
-        rel_x = start_x
-        for it in self.line:
-            ascent = it.font.metrics("ascent")
-            y_top = baseline - ascent
-            if it.is_sup:
-                y_top = baseline - ref_ascent
-            abs_x = self.x + rel_x
-            abs_y = self.y + y_top
-            self.commands.append(DrawText(abs_x, abs_y, it.text, it.font, it.color))
-            rel_x += it.font.measure(it.text)
-
-        self.cursor_y = baseline + max_descent
-        if paragraph_gap:
-            self.cursor_y += 12
-
-        self.line.clear()
-        self.line_width = 0
-
-    # ---- text placement helpers
-    def add_word_plain(self, word: str, font: tkinter.font.Font, color: str) -> None:
-        w = font.measure(word)
-
-        if (not self.style.in_pre) and (not self.word_fits(w)) and self.line:
-            self.flush_line(paragraph_gap=False)
-
-        self.push_piece(word, font, color, is_sup=self.style.in_sup)
-        if not self.style.in_pre:
-            self.push_space(font, color)
-
-    def add_word_with_soft_hyphens(self, word: str, font: tkinter.font.Font, color: str) -> None:
-        plain = word.replace(SOFT_HYPHEN, "")
-        plain_w = font.measure(plain)
-
-        if self.style.in_pre:
-            self.add_word_plain(plain, font, color)
-            return
-
-        if self.word_fits(plain_w) or not self.line:
-            self.add_word_plain(plain, font, color)
-            return
-
-        if SOFT_HYPHEN not in word:
-            self.flush_line(paragraph_gap=False)
-            self.add_word_plain(plain, font, color)
-            return
-
-        parts = word.split(SOFT_HYPHEN)
-        best_i = None
-        best_prefix = ""
-        for i in range(1, len(parts) + 1):
-            prefix = "".join(parts[:i]) + "-"
-            if self.word_fits(font.measure(prefix)):
-                best_i = i
-                best_prefix = prefix
-
-        if best_i is None:
-            self.flush_line(paragraph_gap=False)
-            self.add_word_with_soft_hyphens(word, font, color)
-            return
-
-        self.add_word_plain(best_prefix, font, color)
-        self.flush_line(paragraph_gap=False)
-        remainder = "".join(parts[best_i:])
-        if remainder:
-            self.add_word_plain(remainder, font, color)
-
-    def add_abbr_word(self, word: str, normal_font: tkinter.font.Font, color: str) -> None:
-        small_size = max(8, int(self.style.size * 0.8))
-        small_font = get_font(small_size, "bold", self.style.slant, self.style.family)
-
-        runs: List[Tuple[str, tkinter.font.Font]] = []
-        cur_font: Optional[tkinter.font.Font] = None
-        cur_text = ""
-
-        def flush_run():
-            nonlocal cur_font, cur_text
-            if cur_text:
-                runs.append((cur_text, cur_font))
-            cur_text = ""
-
-        for ch in word:
-            if ch.islower():
-                out = ch.upper()
-                f = small_font
-            else:
-                out = ch
-                f = normal_font
-
-            if cur_font is None:
-                cur_font = f
-                cur_text = out
-            elif f == cur_font:
-                cur_text += out
-            else:
-                flush_run()
-                cur_font = f
-                cur_text = out
-        flush_run()
-
-        total_w = sum(f.measure(t) for t, f in runs)
-        if (not self.style.in_pre) and (not self.word_fits(total_w)) and self.line:
-            self.flush_line(paragraph_gap=False)
-
-        for t, f in runs:
-            self.push_piece(t, f, color, is_sup=self.style.in_sup)
-        if not self.style.in_pre:
-            self.push_space(normal_font, color)
-
-    def add_pre_text(self, text: str, font: tkinter.font.Font, color: str) -> None:
-        for ch in text:
-            if ch == "\n":
-                self.flush_line(paragraph_gap=False)
-            elif ch == "\t":
-                self.push_piece("    ", font, color, is_sup=self.style.in_sup)
-            else:
-                if ch == SOFT_HYPHEN:
-                    continue
-                self.push_piece(ch, font, color, is_sup=self.style.in_sup)
-
-    # ---- tree walk
-    def recurse(self, node: Node) -> None:
-        if isinstance(node, Text):
-            # Chapter 6: Get font and color from node.style
-            weight = node.style["font-weight"]
-            style_val = node.style["font-style"]
-            if style_val == "normal":
-                style_val = "roman"
-            size = int(float(node.style["font-size"][:-2]) * 0.75)
-            family = node.style.get("font-family", "Times") 
-            font = get_font(size, weight, style_val, family)  # family 인자 추가
-            color = node.style["color"]
-            
-            if self.style.in_pre:
-                self.add_pre_text(node.text, font, color)
-            else:
-                for w in node.text.split():
-                    if self.style.in_abbr:
-                        self.add_abbr_word(w, font, color)
-                    else:
-                        self.add_word_with_soft_hyphens(w, font, color)
-            return
-
-        assert isinstance(node, Element)
-        self.open_element(node)
-        for child in node.children:
-            self.recurse(child)
-        self.close_element(node)
-
-    def open_element(self, elt: Element) -> None:
-        tag = elt.tag
-
-        # inline controls
-        if tag == "br":
-            self.flush_line(paragraph_gap=False)
-            return
-
-        # formatting
-        if tag == "b":
-            self.push_style(weight="bold", tag="b")
-        elif tag == "i":
-            self.push_style(slant="italic", tag="i")
-        elif tag == "small":
-            self.push_style(size=max(8, self.style.size - 2), tag="small")
-        elif tag == "big":
-            self.push_style(size=self.style.size + 4, tag="big")
-        elif tag == "sup":
-            self.push_style(size=max(8, self.style.size // 2), in_sup=True, tag="sup")
-        elif tag == "abbr":
-            self.push_style(in_abbr=True, tag="abbr")
-        elif tag == "pre":
-            self.push_style(in_pre=True, family="Courier New", tag="pre")
-        elif tag == "h1" and elt.attributes.get("class", "") == "title":
-            self.push_style(center=True, size=24, weight="bold", tag="h1-title")
-        else:
-            pass
-
-    def close_element(self, elt: Element) -> None:
-        tag = elt.tag
-
-        if tag == "h1" and elt.attributes.get("class", "") == "title":
-            self.flush_line(paragraph_gap=False)
-            self.pop_style_to_tag("h1-title")
-            return
-
-        if tag in ("b", "i", "small", "big", "sup", "abbr"):
-            self.pop_style_to_tag(tag)
-        elif tag == "pre":
-            self.flush_line(paragraph_gap=False)
-            self.pop_style_to_tag("pre")
+    def execute(self, scroll: float, canvas: tkinter.Canvas) -> None:
+        canvas.create_rectangle(
+            self.rect.left, self.rect.top - scroll,
+            self.rect.right, self.rect.bottom - scroll,
+            width=self.thickness, outline=self.color
+        )
 
 
 # ============================================================
-# Chapter 5: Layout tree (DocumentLayout + BlockLayout)
+# Chapter 7: TextLayout - individual word layout
+# ============================================================
+
+class TextLayout:
+    def __init__(self, node: Node, word: str, parent: "LineLayout", previous: Optional["TextLayout"]):
+        self.node = node
+        self.word = word
+        self.children: List = []
+        self.parent = parent
+        self.previous = previous
+        self.x: float = 0
+        self.y: float = 0
+        self.width: float = 0
+        self.height: float = 0
+        self.font: Optional[tkinter.font.Font] = None
+
+    def layout(self) -> None:
+        weight = self.node.style["font-weight"]
+        style_val = self.node.style["font-style"]
+        if style_val == "normal":
+            style_val = "roman"
+        size = int(float(self.node.style["font-size"][:-2]) * 0.75)
+        family = self.node.style.get("font-family", "Times")
+        self.font = get_font(size, weight, style_val, family)
+
+        self.width = self.font.measure(self.word)
+
+        if self.previous:
+            space = self.previous.font.measure(" ")
+            self.x = self.previous.x + space + self.previous.width
+        else:
+            self.x = self.parent.x
+
+        self.height = self.font.metrics("linespace")
+
+    def paint(self) -> List[DrawText]:
+        color = self.node.style["color"]
+        return [DrawText(self.x, self.y, self.word, self.font, color)]
+
+
+# ============================================================
+# Chapter 7: LineLayout - single line of text
+# ============================================================
+
+class LineLayout:
+    def __init__(self, node: Node, parent: "BlockLayout", previous: Optional["LineLayout"]):
+        self.node = node
+        self.parent = parent
+        self.previous = previous
+        self.children: List[TextLayout] = []
+        self.x: float = 0
+        self.y: float = 0
+        self.width: float = 0
+        self.height: float = 0
+
+    def layout(self) -> None:
+        self.width = self.parent.width
+        self.x = self.parent.x
+
+        if self.previous:
+            self.y = self.previous.y + self.previous.height
+        else:
+            self.y = self.parent.y
+
+        for word in self.children:
+            word.layout()
+
+        if not self.children:
+            self.height = 0
+            return
+
+        max_ascent = max([word.font.metrics("ascent") for word in self.children])
+        baseline = self.y + 1.25 * max_ascent
+        for word in self.children:
+            word.y = baseline - word.font.metrics("ascent")
+        max_descent = max([word.font.metrics("descent") for word in self.children])
+        self.height = 1.25 * (max_ascent + max_descent)
+
+    def paint(self) -> List:
+        return []
+
+
+# ============================================================
+# Chapter 5/7: Layout tree (DocumentLayout + BlockLayout)
 # ============================================================
 
 class DocumentLayout:
-    def __init__(self, node: Element, viewport_width: int, viewport_height: int):
+    def __init__(self, node: Element):
         self.node = node
         self.parent = None
         self.children: List["BlockLayout"] = []
         self.x = HSTEP
         self.y = VSTEP
-        self.width = max(viewport_width - 2 * HSTEP, 1)
-        self.height = max(viewport_height, 1)
+        self.width: float = 0
+        self.height: float = 0
 
     def layout(self) -> None:
         child = BlockLayout(self.node, self, previous=None)
         self.children = [child]
+        self.width = WIDTH - 2 * HSTEP
         child.layout()
         self.height = child.height
 
-    def paint(self) -> List[DrawCommand]:
+    def paint(self) -> List:
         return []
 
+
 class BlockLayout:
-    def __init__(self, node: Node, parent: Union["DocumentLayout", "BlockLayout"], previous: Optional["BlockLayout"]):
+    def __init__(self, node: Node, parent: Union["DocumentLayout", "BlockLayout"],
+                 previous: Optional["BlockLayout"]):
         self.node = node
         self.parent = parent
         self.previous = previous
-
-        self.children: List["BlockLayout"] = []
-
-        self.x = 0
-        self.y = 0
-        self.width = 0
-        self.height = 0
-
-        # for inline mode
-        self.inline: Optional[InlineLayout] = None
+        self.children: List[Union["BlockLayout", LineLayout]] = []
+        self.x: float = 0
+        self.y: float = 0
+        self.width: float = 0
+        self.height: float = 0
+        self.cursor_x: float = 0
 
     def layout_mode(self) -> str:
         if isinstance(self.node, Text):
             return "inline"
         assert isinstance(self.node, Element)
 
-        # If any child is a block element, this is block mode.
         for child in self.node.children:
             if isinstance(child, Element) and child.tag in BLOCK_ELEMENTS:
                 return "block"
 
-        # Otherwise, if it has children, inline mode (text flow).
         if self.node.children:
             return "inline"
         return "block"
 
     def layout(self) -> None:
-        # Position/width come from parent & previous sibling
         self.x = self.parent.x
         self.width = self.parent.width
 
@@ -977,204 +850,394 @@ class BlockLayout:
         mode = self.layout_mode()
 
         if mode == "block":
-            prev = None
+            previous = None
             for child in self.node.children:
-                # Skip pure whitespace text nodes in block flow to avoid creating empty blocks
-                if isinstance(child, Text) and not child.text.strip():
-                    continue
-                nxt = BlockLayout(child, self, previous=prev)
-                self.children.append(nxt)
-                prev = nxt
-
-            for c in self.children:
-                c.layout()
-
-            self.height = sum(c.height for c in self.children)
-
+                next_block = BlockLayout(child, self, previous)
+                self.children.append(next_block)
+                previous = next_block
         else:
-            # Inline mode: lay out all text inside this node.
-            self.inline = InlineLayout(self.node, x=self.x, y=self.y, width=self.width)
-            self.height = self.inline.height
+            self.cursor_x = 0
+            self.new_line()
+            self.recurse(self.node)
 
-        # Simple vertical spacing for some block types (keeps chap4 feel)
+        for child in self.children:
+            child.layout()
+
+        self.height = sum([child.height for child in self.children])
+
+    def recurse(self, node: Node) -> None:
+        if isinstance(node, Text):
+            for word in node.text.split():
+                self.word(node, word)
+        else:
+            if node.tag == "br":
+                self.new_line()
+            for child in node.children:
+                self.recurse(child)
+
+    def new_line(self) -> None:
+        self.cursor_x = 0
+        last_line = self.children[-1] if self.children else None
+        new_line = LineLayout(self.node, self, last_line)
+        self.children.append(new_line)
+
+    def word(self, node: Node, word: str) -> None:
+        weight = node.style["font-weight"]
+        style_val = node.style["font-style"]
+        if style_val == "normal":
+            style_val = "roman"
+        size = int(float(node.style["font-size"][:-2]) * 0.75)
+        family = node.style.get("font-family", "Times")
+        font = get_font(size, weight, style_val, family)
+
+        w = font.measure(word)
+        if self.cursor_x + w > self.width:
+            self.new_line()
+        line = self.children[-1]
+        previous_word = line.children[-1] if line.children else None
+        text = TextLayout(node, word, line, previous_word)
+        line.children.append(text)
+        self.cursor_x += w + font.measure(" ")
+
+    def self_rect(self) -> Rect:
+        return Rect(self.x, self.y, self.x + self.width, self.y + self.height)
+
+    def paint(self) -> List:
+        cmds = []
         if isinstance(self.node, Element):
-            if self.node.tag == "p":
-                self.height += 12
-            elif self.node.tag == "pre":
-                self.height += 12
-            elif self.node.tag == "h1" and self.node.attributes.get("class", "") == "title":
-                self.height += 16
-
-        # Ensure non-negative
-        if self.height < 0:
-            self.height = 0
-
-    def paint(self) -> List[DrawCommand]:
-        cmds: List[DrawCommand] = []
-
-        # Background for <pre>
-        if isinstance(self.node, Element) and self.node.tag == "pre":
-            cmds.append(DrawRect(
-                self.x,
-                self.y,
-                self.x + self.width,
-                self.y + self.height,
-                "gray"
-            ))
-
-        if self.inline is not None:
-            cmds.extend(self.inline.commands)
-
+            bgcolor = self.node.style.get("background-color", "transparent")
+            if bgcolor != "transparent":
+                cmds.append(DrawRect(self.self_rect(), bgcolor))
         return cmds
 
 
-def paint_tree(layout_obj: Union[DocumentLayout, BlockLayout], out: List[DrawCommand]) -> None:
+def paint_tree(layout_obj: Union[DocumentLayout, BlockLayout, LineLayout, TextLayout],
+               out: List) -> None:
     out.extend(layout_obj.paint())
-    for child in getattr(layout_obj, "children", []):
+    for child in layout_obj.children:
         paint_tree(child, out)
 
 
 # ============================================================
-# Browser (ch1 networking + ch2 GUI + ch5 layout)
+# Chapter 7: Tab class - manages individual web pages
 # ============================================================
 
-class Browser:
-    def __init__(self, default_file: str):
-        self.sockets: Dict[Tuple[str, str, int], socket.socket] = {}
-        self.cache: Dict[str, Tuple[float, Response]] = {}
-
-        self.default_file = default_file
-
-        self.window = tkinter.Tk()
-        self.canvas = tkinter.Canvas(self.window, width=WIDTH, height=HEIGHT)
-        self.canvas.pack(fill="both", expand=True)
-
-        self.scroll = 0
-        self.doc_height = HEIGHT
-        self.current_url: Optional[str] = None
-
-        self.tree: Optional[Element] = None
-        self.display_list: List[DrawCommand] = []
+class Tab:
+    def __init__(self, tab_height: float, browser: "Browser"):
+        self.browser = browser
+        self.url: Optional[URL] = None
+        self.history: List[URL] = []
+        self.tab_height = tab_height
+        self.scroll: float = 0
+        self.nodes: Optional[Element] = None
         self.document: Optional[DocumentLayout] = None
+        self.display_list: List = []
 
-        self.window.bind("<Down>", lambda e: self.scroll_by(+SCROLL_STEP))
-        self.window.bind("<Up>", lambda e: self.scroll_by(-SCROLL_STEP))
-        self.window.bind("<MouseWheel>", self.on_mousewheel)
-        self.window.bind("<Button-4>", lambda e: self.scroll_by(-SCROLL_STEP))
-        self.window.bind("<Button-5>", lambda e: self.scroll_by(+SCROLL_STEP))
-        self.window.bind("<Configure>", self.on_resize)
-        self.default_style_sheet = CSSParser("""
-            pre { background-color: gray; }
-            a { color: blue; }
-            i { font-style: italic; }
-            b { font-weight: bold; }
-            small { font-size: 90%; }
-            big { font-size: 110%; }
-        """).parse()
+    def load(self, url: URL) -> None:
+        self.url = url
+        self.history.append(url)
+        body = self.browser.fetch_url(url)
+        body = self.browser.decode_entities(body)
+        self.nodes = HTMLParser(body).parse()
 
-    def load(self, url: Optional[str]) -> None:
-        if not url:
-            url = f"file://{self.default_file}"
-        self.current_url = url
-
-        try:
-            u = URL(url)
-        except Exception:
-            u = URL("about:blank")
-            self.current_url = "about:blank"
-
-        resp = self.fetch(u, redirects_left=MAX_REDIRECTS)
-        body_text = self.decode_text(resp)
-
-        if resp.url.view_source:
-            # Render source literally
-            root = Element("html", {}, None)
-            body = Element("body", {}, root)
-            pre = Element("pre", {}, body)
-            pre.children.append(Text(body_text, pre))
-            body.children.append(pre)
-            root.children.append(body)
-            self.tree = root
-        else:
-            body_text = self.decode_entities(body_text)
-            self.tree = HTMLParser(body_text).parse()
-
-        # Chapter 6: Apply CSS styles
-        rules = self.default_style_sheet.copy()
-        
-        # Find and load linked stylesheets
+        rules = CSSParser(DEFAULT_STYLE_SHEET_TEXT).parse()
         links = [node.attributes["href"]
-                for node in tree_to_list(self.tree, [])
-                if isinstance(node, Element)
-                and node.tag == "link"
-                and node.attributes.get("rel") == "stylesheet"
-                and "href" in node.attributes]
-        
-        # Download and parse each linked stylesheet
+                 for node in tree_to_list(self.nodes, [])
+                 if isinstance(node, Element)
+                 and node.tag == "link"
+                 and node.attributes.get("rel") == "stylesheet"
+                 and "href" in node.attributes]
         for link in links:
-            style_url = u.resolve(link)
             try:
-                body = self.decode_text(self.fetch(style_url, redirects_left=MAX_REDIRECTS))
-                rules.extend(CSSParser(body).parse())
+                style_url = url.resolve(link)
+                style_body = self.browser.fetch_url(style_url)
+                rules.extend(CSSParser(style_body).parse())
             except:
                 continue
-        
-        # Sort rules by cascade priority and apply to tree
-        style(self.tree, sorted(rules, key=cascade_priority))
+        style(self.nodes, sorted(rules, key=cascade_priority))
 
-        self.relayout()
-        self.scroll = 0
-        self.draw()
-
-    def relayout(self) -> None:
-        w = max(self.canvas.winfo_width(), 1)
-        h = max(self.canvas.winfo_height(), 1)
-        assert self.tree is not None
-
-        self.document = DocumentLayout(self.tree, viewport_width=w, viewport_height=h)
+        self.document = DocumentLayout(self.nodes)
         self.document.layout()
-
         self.display_list = []
         paint_tree(self.document, self.display_list)
 
-        self.doc_height = max(self.document.height + 2 * VSTEP, h)
+    def draw(self, canvas: tkinter.Canvas, offset: float) -> None:
+        for cmd in self.display_list:
+            if cmd.rect.top > self.scroll + self.tab_height:
+                continue
+            if cmd.rect.bottom < self.scroll:
+                continue
+            cmd.execute(self.scroll - offset, canvas)
+
+    def scrolldown(self) -> None:
+        max_y = max(self.document.height + 2 * VSTEP - self.tab_height, 0)
+        self.scroll = min(self.scroll + SCROLL_STEP, max_y)
+
+    def scrollup(self) -> None:
+        self.scroll = max(self.scroll - SCROLL_STEP, 0)
+
+    def click(self, x: float, y: float) -> None:
+        y += self.scroll
+        objs = [obj for obj in tree_to_list(self.document, [])
+                if isinstance(obj, TextLayout)
+                and obj.x <= x < obj.x + obj.width
+                and obj.y <= y < obj.y + obj.height]
+        if not objs:
+            return
+        elt = objs[-1].node
+        while elt:
+            if isinstance(elt, Text):
+                pass
+            elif elt.tag == "a" and "href" in elt.attributes:
+                url = self.url.resolve(elt.attributes["href"])
+                return self.load(url)
+            elt = elt.parent
+
+    def go_back(self) -> None:
+        if len(self.history) > 1:
+            self.history.pop()
+            back = self.history.pop()
+            self.load(back)
+
+
+# ============================================================
+# Chapter 7: Chrome class - browser UI
+# ============================================================
+
+class Chrome:
+    def __init__(self, browser: "Browser"):
+        self.browser = browser
+        self.focus: Optional[str] = None
+        self.address_bar: str = ""
+
+        self.font = get_font(20, "normal", "roman")
+        self.font_height = self.font.metrics("linespace")
+
+        self.padding = 5
+        self.tabbar_top = 0
+        self.tabbar_bottom = self.font_height + 2 * self.padding
+
+        plus_width = self.font.measure("+") + 2 * self.padding
+        self.newtab_rect = Rect(
+            self.padding, self.padding,
+            self.padding + plus_width,
+            self.padding + self.font_height
+        )
+
+        self.urlbar_top = self.tabbar_bottom
+        self.urlbar_bottom = self.urlbar_top + self.font_height + 2 * self.padding
+
+        back_width = self.font.measure("<") + 2 * self.padding
+        self.back_rect = Rect(
+            self.padding,
+            self.urlbar_top + self.padding,
+            self.padding + back_width,
+            self.urlbar_bottom - self.padding
+        )
+
+        self.address_rect = Rect(
+            self.back_rect.right + self.padding,
+            self.urlbar_top + self.padding,
+            WIDTH - self.padding,
+            self.urlbar_bottom - self.padding
+        )
+
+        self.bottom = self.urlbar_bottom
+
+    def tab_rect(self, i: int) -> Rect:
+        tabs_start = self.newtab_rect.right + self.padding
+        tab_width = self.font.measure("Tab X") + 2 * self.padding
+        return Rect(
+            tabs_start + tab_width * i, self.tabbar_top,
+            tabs_start + tab_width * (i + 1), self.tabbar_bottom
+        )
+
+    def paint(self) -> List:
+        cmds = []
+
+        # Background
+        cmds.append(DrawRect(Rect(0, 0, WIDTH, self.bottom), "white"))
+        cmds.append(DrawLine(0, self.bottom, WIDTH, self.bottom, "black", 1))
+
+        # New tab button
+        cmds.append(DrawOutline(self.newtab_rect, "black", 1))
+        cmds.append(DrawText(
+            self.newtab_rect.left + self.padding,
+            self.newtab_rect.top,
+            "+", self.font, "black"
+        ))
+
+        # Tab bar
+        for i, tab in enumerate(self.browser.tabs):
+            bounds = self.tab_rect(i)
+            cmds.append(DrawLine(
+                bounds.left, 0, bounds.left, bounds.bottom,
+                "black", 1
+            ))
+            cmds.append(DrawLine(
+                bounds.right, 0, bounds.right, bounds.bottom,
+                "black", 1
+            ))
+            cmds.append(DrawText(
+                bounds.left + self.padding, bounds.top + self.padding,
+                f"Tab {i}", self.font, "black"
+            ))
+
+            if tab == self.browser.active_tab:
+                cmds.append(DrawLine(
+                    0, bounds.bottom, bounds.left, bounds.bottom,
+                    "black", 1
+                ))
+                cmds.append(DrawLine(
+                    bounds.right, bounds.bottom, WIDTH, bounds.bottom,
+                    "black", 1
+                ))
+
+        # Back button
+        cmds.append(DrawOutline(self.back_rect, "black", 1))
+        cmds.append(DrawText(
+            self.back_rect.left + self.padding,
+            self.back_rect.top,
+            "<", self.font, "black"
+        ))
+
+        # Address bar
+        cmds.append(DrawOutline(self.address_rect, "black", 1))
+        if self.focus == "address bar":
+            cmds.append(DrawText(
+                self.address_rect.left + self.padding,
+                self.address_rect.top,
+                self.address_bar, self.font, "black"
+            ))
+            w = self.font.measure(self.address_bar)
+            cmds.append(DrawLine(
+                self.address_rect.left + self.padding + w,
+                self.address_rect.top,
+                self.address_rect.left + self.padding + w,
+                self.address_rect.bottom,
+                "red", 1
+            ))
+        else:
+            url = str(self.browser.active_tab.url) if self.browser.active_tab.url else ""
+            cmds.append(DrawText(
+                self.address_rect.left + self.padding,
+                self.address_rect.top,
+                url, self.font, "black"
+            ))
+
+        return cmds
+
+    def click(self, x: float, y: float) -> None:
+        self.focus = None
+        if self.newtab_rect.contains_point(x, y):
+            self.browser.new_tab(URL("about:blank"))
+        elif self.back_rect.contains_point(x, y):
+            self.browser.active_tab.go_back()
+        elif self.address_rect.contains_point(x, y):
+            self.focus = "address bar"
+            self.address_bar = ""
+        else:
+            for i, tab in enumerate(self.browser.tabs):
+                if self.tab_rect(i).contains_point(x, y):
+                    self.browser.active_tab = tab
+                    break
+
+    def keypress(self, char: str) -> None:
+        if self.focus == "address bar":
+            self.address_bar += char
+
+    def backspace(self) -> None:
+        if self.focus == "address bar" and self.address_bar:
+            self.address_bar = self.address_bar[:-1]
+
+    def enter(self) -> None:
+        if self.focus == "address bar":
+            self.browser.active_tab.load(URL(self.address_bar))
+            self.focus = None
+
+
+# ============================================================
+# Browser (ch7: multi-tab, chrome UI)
+# ============================================================
+
+class Browser:
+    def __init__(self):
+        self.sockets: Dict[Tuple[str, str, int], socket.socket] = {}
+        self.cache: Dict[str, Tuple[float, Response]] = {}
+
+        self.window = tkinter.Tk()
+        self.canvas = tkinter.Canvas(self.window, width=WIDTH, height=HEIGHT, bg="white")
+        self.canvas.pack(fill="both", expand=True)
+
+        self.tabs: List[Tab] = []
+        self.active_tab: Optional[Tab] = None
+        self.chrome = Chrome(self)
+
+        self.window.bind("<Down>", self.handle_down)
+        self.window.bind("<Up>", self.handle_up)
+        self.window.bind("<Button-1>", self.handle_click)
+        self.window.bind("<Key>", self.handle_key)
+        self.window.bind("<Return>", self.handle_enter)
+        self.window.bind("<BackSpace>", self.handle_backspace)
+        self.window.bind("<MouseWheel>", self.handle_mousewheel)
+
+    def new_tab(self, url: URL) -> None:
+        new_tab = Tab(HEIGHT - self.chrome.bottom, self)
+        new_tab.load(url)
+        self.active_tab = new_tab
+        self.tabs.append(new_tab)
+        self.draw()
+
+    def handle_down(self, e) -> None:
+        self.active_tab.scrolldown()
+        self.draw()
+
+    def handle_up(self, e) -> None:
+        self.active_tab.scrollup()
+        self.draw()
+
+    def handle_click(self, e) -> None:
+        if e.y < self.chrome.bottom:
+            self.chrome.click(e.x, e.y)
+        else:
+            tab_y = e.y - self.chrome.bottom
+            self.active_tab.click(e.x, tab_y)
+        self.draw()
+
+    def handle_key(self, e) -> None:
+        if len(e.char) == 0:
+            return
+        if not (0x20 <= ord(e.char) < 0x7f):
+            return
+        self.chrome.keypress(e.char)
+        self.draw()
+
+    def handle_enter(self, e) -> None:
+        self.chrome.enter()
+        self.draw()
+
+    def handle_backspace(self, e) -> None:
+        self.chrome.backspace()
+        self.draw()
+
+    def handle_mousewheel(self, e) -> None:
+        if e.delta > 0:
+            self.active_tab.scrollup()
+        else:
+            self.active_tab.scrolldown()
+        self.draw()
 
     def draw(self) -> None:
         self.canvas.delete("all")
-        h = max(self.canvas.winfo_height(), 1)
+        self.active_tab.draw(self.canvas, self.chrome.bottom)
+        for cmd in self.chrome.paint():
+            cmd.execute(0, self.canvas)
 
-        for cmd in self.display_list:
-            if cmd.top > self.scroll + h:
-                continue
-            if cmd.bottom < self.scroll:
-                continue
-            cmd.execute(self.scroll, self.canvas)
+    # ---- Networking methods ----
+    def fetch_url(self, url: URL) -> str:
+        resp = self.fetch(url, redirects_left=MAX_REDIRECTS)
+        return resp.body.decode("utf-8", errors="replace")
 
-        self.clamp_scroll()
-
-    # ---- scrolling
-    def clamp_scroll(self) -> None:
-        h = max(self.canvas.winfo_height(), 1)
-        max_scroll = max(self.doc_height - h, 0)
-        self.scroll = max(0, min(self.scroll, max_scroll))
-
-    def scroll_by(self, delta: int) -> None:
-        self.scroll += delta
-        self.clamp_scroll()
-        self.draw()
-
-    def on_mousewheel(self, e) -> None:
-        self.scroll_by(-SCROLL_STEP if e.delta > 0 else +SCROLL_STEP)
-
-    def on_resize(self, e) -> None:
-        if e.width < 50 or e.height < 50:
-            return
-        if not self.tree:
-            return
-        self.relayout()
-        self.draw()
-
-    # ---- chapter 1: fetch/request (gzip + chunked + basic cache/redirect)
     def fetch(self, url: URL, redirects_left: int) -> Response:
         if url.scheme == "about":
             return Response(url=url, status=200, reason="OK", headers={}, body=b"")
@@ -1233,7 +1296,7 @@ class Browser:
 
         headers = {
             "Host": url.host,
-            "User-Agent": "toy-browser/5.0 (WebBrowserEngineering)",
+            "User-Agent": "toy-browser/7.0 (WebBrowserEngineering)",
             "Connection": "keep-alive",
             "Accept-Encoding": "gzip",
         }
@@ -1325,11 +1388,7 @@ class Browser:
             return None
         return None
 
-    def decode_text(self, resp: Response) -> str:
-        return resp.body.decode("utf-8", errors="replace")
-
     def decode_entities(self, text: str) -> str:
-        # keep minimal entities + soft hyphen for exercise 3-3
         return (
             text.replace("&lt;", "<")
                 .replace("&gt;", ">")
@@ -1347,9 +1406,7 @@ class Browser:
 
 
 if __name__ == "__main__":
-    DEFAULT_FILE = "./test.html"
-    url = sys.argv[1] if len(sys.argv) > 1 else None
-
-    b = Browser(default_file=DEFAULT_FILE)
-    b.load(url)
+    url_arg = sys.argv[1] if len(sys.argv) > 1 else "file://./test.html"
+    browser = Browser()
+    browser.new_tab(URL(url_arg))
     tkinter.mainloop()
