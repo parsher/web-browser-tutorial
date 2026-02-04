@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chapter 8 Form Test</title>
+</head>
+<body>
+    <h1>Form Test Page</h1>
+
+    <p>This page tests Chapter 8 form functionality.</p>
+
+    <h2>Simple Form</h2>
+    <form action="https://httpbin.org/post" method="post">
+        <p>Name: <input name="username"></p>
+        <p>Email: <input name="email"></p>
+        <p><button>Submit</button></p>
+    </form>
+
+    <h2>Search Form</h2>
+    <form action="https://httpbin.org/post" method="post">
+        <p>Search: <input name="q"></p>
+        <p><button>Search</button></p>
+    </form>
+
+    <h2>Instructions</h2>
+    <ul>
+        <li>Click on an input field to focus it</li>
+        <li>Type text using your keyboard</li>
+        <li>Click the button to submit the form</li>
+        <li>The form will POST to httpbin.org which echoes back the data</li>
+    </ul>
+
+    <p>Go back to <a href="file://./test.html">test.html</a></p>
+</body>
+</html>
