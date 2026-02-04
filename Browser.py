@@ -1,496 +1,1355 @@
+# browser.py
+import socket
+import ssl
+import sys
+import time
+import gzip
 import tkinter
 import tkinter.font
-import os
-from pathlib import Path
+from dataclasses import dataclass, replace
+from typing import Dict, Optional, Tuple, List, Union
 
-from URL import URL
-
-X_POS = 100
-Y_POS = 100
-WIDTH = 800
-HEIGHT = 600
+# -----------------------
+# UI constants
+# -----------------------
 HSTEP = 13
-VSETEP = 18
+VSTEP = 18
 SCROLL_STEP = 100
+WIDTH, HEIGHT = 800, 600
+MAX_REDIRECTS = 10
+SOFT_HYPHEN = "\N{soft hyphen}"  # U+00AD
 
-FONTS = {}
+# -----------------------
+# Chapter 5: block elements
+# -----------------------
+BLOCK_ELEMENTS = [
+    "html", "body", "article", "section", "nav", "aside",
+    "h1", "h2", "h3", "h4", "h5", "h6", "hgroup", "header",
+    "footer", "address", "p", "hr", "pre", "blockquote",
+    "ol", "ul", "menu", "li", "dl", "dt", "dd", "figure",
+    "figcaption", "main", "div", "table", "form", "fieldset",
+    "legend", "details", "summary",
+]
 
-def get_font(size, weight, style):
-    key = (size, weight, style)
+# -----------------------
+# Chapter 6: Inherited Properties
+# -----------------------
+INHERITED_PROPERTIES = {
+    "font-size": "16px",
+    "font-style": "normal",
+    "font-weight": "normal",
+    "color": "black",
+    "font-family": "Times",
+}
+
+
+
+# ============================================================
+# Chapter 6: CSS Parser
+# ============================================================
+
+class CSSParser:
+    def __init__(self, s: str):
+        self.s = s
+        self.i = 0
+
+    def whitespace(self) -> None:
+        """Skip whitespace characters"""
+        while self.i < len(self.s) and self.s[self.i].isspace():
+            self.i += 1
+
+    def word(self) -> str:
+        """Parse a CSS word (property, value, tag name, etc.)"""
+        start = self.i
+        while self.i < len(self.s):
+            if self.s[self.i].isalnum() or self.s[self.i] in "#-.%":
+                self.i += 1
+            else:
+                break
+        if not (self.i > start):
+            raise Exception("Parsing error: expected word")
+        return self.s[start:self.i]
+
+    def literal(self, literal: str) -> None:
+        """Expect and consume a literal character"""
+        if not (self.i < len(self.s) and self.s[self.i] == literal):
+            raise Exception(f"Parsing error: expected '{literal}'")
+        self.i += 1
+
+    def ignore_until(self, chars: List[str]) -> Optional[str]:
+        """Skip until one of the given characters"""
+        while self.i < len(self.s):
+            if self.s[self.i] in chars:
+                return self.s[self.i]
+            else:
+                self.i += 1
+        return None
+
+    def pair(self) -> Tuple[str, str]:
+        """Parse a property:value pair"""
+        prop = self.word()
+        self.whitespace()
+        self.literal(":")
+        self.whitespace()
+        val = self.word()
+        return prop.casefold(), val
+
+    def body(self) -> Dict[str, str]:
+        """Parse CSS body (property-value pairs)"""
+        pairs = {}
+        while self.i < len(self.s) and self.s[self.i] != "}":
+            try:
+                prop, val = self.pair()
+                pairs[prop] = val
+                self.whitespace()
+                self.literal(";")
+                self.whitespace()
+            except Exception:
+                why = self.ignore_until([";", "}"])
+                if why == ";":
+                    self.literal(";")
+                    self.whitespace()
+                else:
+                    break
+        return pairs
+
+    def selector(self) -> Union["TagSelector", "DescendantSelector"]:
+        """Parse a CSS selector"""
+        out = TagSelector(self.word().casefold())
+        self.whitespace()
+        while self.i < len(self.s) and self.s[self.i] != "{":
+            tag = self.word()
+            descendant = TagSelector(tag.casefold())
+            out = DescendantSelector(out, descendant)
+            self.whitespace()
+        return out
+
+    def parse(self) -> List[Tuple[Union["TagSelector", "DescendantSelector"], Dict[str, str]]]:
+        """Parse CSS file into rules"""
+        rules = []
+        while self.i < len(self.s):
+            try:
+                self.whitespace()
+                selector = self.selector()
+                self.literal("{")
+                self.whitespace()
+                body = self.body()
+                self.literal("}")
+                rules.append((selector, body))
+            except Exception:
+                why = self.ignore_until(["}"])
+                if why == "}":
+                    self.literal("}")
+                    self.whitespace()
+                else:
+                    break
+        return rules
+
+
+# ============================================================
+# Chapter 6: CSS Selectors
+# ============================================================
+
+class TagSelector:
+    def __init__(self, tag: str):
+        self.tag = tag
+        self.priority = 1
+
+    def matches(self, node: Node) -> bool:
+        return isinstance(node, Element) and self.tag == node.tag
+
+
+class DescendantSelector:
+    def __init__(self, ancestor: Union[TagSelector, "DescendantSelector"], 
+                 descendant: TagSelector):
+        self.ancestor = ancestor
+        self.descendant = descendant
+        self.priority = ancestor.priority + descendant.priority
+
+    def matches(self, node: Node) -> bool:
+        if not self.descendant.matches(node):
+            return False
+        while node.parent:
+            if self.ancestor.matches(node.parent):
+                return True
+            node = node.parent
+        return False
+
+
+# ============================================================
+# Chapter 6: Styling Functions
+# ============================================================
+
+def cascade_priority(rule: Tuple[Union[TagSelector, DescendantSelector], Dict[str, str]]) -> int:
+    """Return priority for cascade ordering"""
+    selector, body = rule
+    return selector.priority
+
+
+def style(node: Node, rules: List[Tuple[Union[TagSelector, DescendantSelector], Dict[str, str]]]) -> None:
+    """Apply CSS styles to node tree"""
+    # Set inherited properties
+    for property, default_value in INHERITED_PROPERTIES.items():
+        if node.parent:
+            node.style[property] = node.parent.style[property]
+        else:
+            node.style[property] = default_value
+
+    # Apply matching CSS rules
+    for selector, body in rules:
+        if not selector.matches(node):
+            continue
+        for property, value in body.items():
+            node.style[property] = value
+
+    # Apply inline style attribute (highest priority)
+    if isinstance(node, Element) and "style" in node.attributes:
+        pairs = CSSParser(node.attributes["style"]).body()
+        for property, value in pairs.items():
+            node.style[property] = value
+
+    # Resolve percentage font sizes
+    if node.style["font-size"].endswith("%"):
+        if node.parent:
+            parent_font_size = node.parent.style["font-size"]
+        else:
+            parent_font_size = INHERITED_PROPERTIES["font-size"]
+        node_pct = float(node.style["font-size"][:-1]) / 100
+        parent_px = float(parent_font_size[:-2])
+        node.style["font-size"] = str(node_pct * parent_px) + "px"
+
+    # Recurse to children
+    for child in node.children:
+        style(child, rules)
+
+
+# -----------------------
+# Networking response
+# -----------------------
+@dataclass
+class Response:
+    url: "URL"
+    status: int
+    reason: str
+    headers: Dict[str, str]
+    body: bytes
+
+# -----------------------
+# URL (ch1/ch2 essentials)
+# -----------------------
+class URL:
+    def __init__(self, url: str):
+        self.original = url
+        self.view_source = False
+        if url.startswith("view-source:"):
+            self.view_source = True
+            url = url[len("view-source:"):]
+
+        if url == "about:blank":
+            self.scheme, self.host, self.port, self.path = "about", "", 0, "blank"
+            self.data_mime, self.data_payload = "text/plain", ""
+            return
+
+        if "://" in url:
+            self.scheme, rest = url.split("://", 1)
+        else:
+            if url.startswith("data:"):
+                self.scheme = "data"
+                rest = url[len("data:"):]
+            else:
+                raise ValueError(f"Unsupported URL: {url}")
+
+        assert self.scheme in ["http", "https", "file", "data"]
+
+        self.host = ""
+        self.port = 0
+        self.path = "/"
+        self.data_mime = "text/plain"
+        self.data_payload = ""
+
+        if self.scheme in ["http", "https"]:
+            if "/" not in rest:
+                rest += "/"
+            hostport, path = rest.split("/", 1)
+            self.path = "/" + path
+            self.port = 80 if self.scheme == "http" else 443
+            if ":" in hostport:
+                self.host, port_str = hostport.split(":", 1)
+                self.port = int(port_str)
+            else:
+                self.host = hostport
+
+        elif self.scheme == "file":
+            # Windows 경로 처리 개선
+            if rest.startswith("/") and len(rest) > 1 and rest[1] != "/":
+                # Unix-style path or Windows path starting with /
+                import os
+                if os.name == 'nt':  # Windows
+                    # /C:/... or /./... 형태를 처리
+                    if len(rest) > 2 and rest[2] == ':':
+                        # /C:/path 형태
+                        self.path = rest[1:]
+                    elif rest.startswith("/./"):
+                        # /./path 형태 - 상대 경로
+                        self.path = rest[2:]
+                    else:
+                        self.path = rest
+                else:
+                    self.path = rest
+            else:
+                self.path = rest
+
+        elif self.scheme == "data":
+            if "," not in rest:
+                raise ValueError("Invalid data: URL (missing comma)")
+            meta, payload = rest.split(",", 1)
+            self.data_payload = payload
+            self.data_mime = (meta.split(";", 1)[0] or "text/plain") if meta else "text/plain"
+
+    def cache_key(self) -> str:
+        if self.scheme in ["http", "https"]:
+            return f"{self.scheme}://{self.host}:{self.port}{self.path}"
+        if self.scheme == "file":
+            return f"file://{self.path}"
+        if self.scheme == "data":
+            return f"data:{self.data_mime},{self.data_payload}"
+        if self.scheme == "about":
+            return "about:blank"
+        return self.original
+
+    # Chapter 6: Resolve relative URLs
+    def resolve(self, url: str) -> "URL":
+        """Convert relative URLs to absolute URLs"""
+        if "://" in url:
+            return URL(url)
+        
+        # Scheme-relative URL (starts with //)
+        if url.startswith("//"):
+            return URL(self.scheme + ":" + url)
+        
+        # Host-relative URL (starts with /)
+        if url.startswith("/"):
+            return URL(f"{self.scheme}://{self.host}:{self.port}{url}")
+        
+        # Path-relative URL
+        dir_path, _ = self.path.rsplit("/", 1)
+        
+        # Handle parent directory (..)
+        while url.startswith("../"):
+            _, url = url.split("/", 1)
+            if "/" in dir_path:
+                dir_path, _ = dir_path.rsplit("/", 1)
+        
+        return URL(f"{self.scheme}://{self.host}:{self.port}{dir_path}/{url}")
+
+
+# ============================================================
+# Chapter 4: HTML tree (DOM-like)
+# ============================================================
+
+class Node:
+    def __init__(self, parent: Optional["Element"]):
+        self.parent = parent
+        self.children: List["Node"] = []
+        self.style: Dict[str, str] = {}  # Chapter 6: style dictionary
+
+class Text(Node):
+    def __init__(self, text: str, parent: Optional["Element"]):
+        super().__init__(parent)
+        self.text = text
+
+    def __repr__(self) -> str:
+        return repr(self.text)
+
+class Element(Node):
+    def __init__(self, tag: str, attributes: Dict[str, str], parent: Optional["Element"]):
+        super().__init__(parent)
+        self.tag = tag
+        self.attributes = attributes
+
+    def __repr__(self) -> str:
+        return "<" + self.tag + ">"
+
+def print_tree(node: Node, indent: int = 0) -> None:
+    print(" " * indent, node)
+    for child in node.children:
+        print_tree(child, indent + 2)
+
+# Chapter 6: Tree to list helper
+def tree_to_list(tree: Node, list_out: List[Node]) -> List[Node]:
+    """Convert tree to flat list of nodes"""
+    list_out.append(tree)
+    for child in tree.children:
+        tree_to_list(child, list_out)
+    return list_out
+
+class HTMLParser:
+    SELF_CLOSING_TAGS = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+    HEAD_TAGS = {
+        "base", "basefont", "bgsound", "noscript",
+        "link", "meta", "title", "style", "script",
+    }
+
+    def __init__(self, body: str):
+        self.body = body
+        self.unfinished: List[Element] = []
+
+    def parse(self) -> Element:
+        i = 0
+        text = ""
+
+        while i < len(self.body):
+            # ---------- 4-1: comments ----------
+            if self.body.startswith("<!--", i):
+                if text:
+                    self.add_text(text)
+                    text = ""
+                end = self.body.find("-->", i + 4)
+                if end == -1:
+                    return self.finish()
+                i = end + 3
+                continue
+
+            # ---------- tags ----------
+            if self.body[i] == "<":
+                if text:
+                    self.add_text(text)
+                    text = ""
+
+                # 4-2: script/style raw text
+                if self.body.startswith("<script", i) or self.body.startswith("<style", i):
+                    tag_end = self.body.find(">", i)
+                    tag_text = self.body[i + 1 : tag_end]
+                    tag, attrs = self.get_attributes(tag_text)
+                    self.add_tag(tag_text)
+
+                    close = f"</{tag}>"
+                    end = self.body.lower().find(close, tag_end)
+                    if end == -1:
+                        return self.finish()
+
+                    raw = self.body[tag_end + 1 : end]
+                    self.add_text(raw)
+                    self.add_tag(f"/{tag}")
+                    i = end + len(close)
+                    continue
+
+                # normal tag
+                j = self.body.find(">", i)
+                if j == -1:
+                    break
+                self.add_tag(self.body[i + 1 : j])
+                i = j + 1
+            else:
+                text += self.body[i]
+                i += 1
+
+        if text:
+            self.add_text(text)
+        return self.finish()
+
+    # ---------------------------
+    # Attribute parsing (4-3/4-4)
+    # ---------------------------
+    def get_attributes(self, text: str):
+        parts = text.split(None, 1)
+        if not parts:
+            return "", {}
+        tag = parts[0].lower()
+        rest = parts[1] if len(parts) > 1 else ""
+        n = len(rest)
+
+        attrs = {}
+        i = 0
+        while True:
+            while i < n and rest[i].isspace():
+                i += 1
+            if i >= n:
+                break
+
+            # Skip unexpected leading characters to avoid getting stuck
+            if not (rest[i].isalnum() or rest[i] in "-_:"):
+                i += 1
+                continue
+
+            key_start = i
+            while i < n and (rest[i].isalnum() or rest[i] in "-_:"):
+                i += 1
+            key = rest[key_start:i].lower()
+
+            while i < n and rest[i].isspace():
+                i += 1
+
+            val = ""
+            if i < n and rest[i] == "=":
+                i += 1
+                while i < n and rest[i].isspace():
+                    i += 1
+                if i < n and rest[i] in "\"'":
+                    q = rest[i]
+                    i += 1
+                    val_start = i
+                    while i < n and rest[i] != q:
+                        i += 1
+                    val = rest[val_start:i]
+                    if i < n:
+                        i += 1
+                else:
+                    val_start = i
+                    while i < n and not rest[i].isspace() and rest[i] != ">":
+                        i += 1
+                    val = rest[val_start:i]
+
+            if key:
+                attrs[key] = val
+        return tag, attrs
+
+    # ---------------------------
+    # Tree construction helpers
+    # ---------------------------
+    def add_text(self, text: str):
+        if not text.strip():
+            return
+        self.implicit_tags(None)
+        parent = self.unfinished[-1]
+        parent.children.append(Text(text, parent))
+
+    def add_tag(self, text: str):
+        if text.startswith("!"):
+            return
+        tag, attrs = self.get_attributes(text)
+        self.implicit_tags(tag)
+
+        # ---------- closing tag (4-6) ----------
+        if tag.startswith("/"):
+            name = tag[1:]
+            for i in range(len(self.unfinished) - 1, 0, -1):
+                if self.unfinished[i].tag == name:
+                    node = self.unfinished[i]
+                    del self.unfinished[i:]
+                    self.unfinished[-1].children.append(node)
+                    return
+            return
+
+        # ---------- self closing ----------
+        if tag in self.SELF_CLOSING_TAGS:
+            parent = self.unfinished[-1]
+            parent.children.append(Element(tag, attrs, parent))
+            return
+
+        # ---------- opening ----------
+        parent = self.unfinished[-1]
+        self.unfinished.append(Element(tag, attrs, parent))
+
+    def implicit_tags(self, tag):
+        while True:
+            open_tags = [n.tag for n in self.unfinished]
+
+            if not open_tags:
+                self.unfinished.append(Element("html", {}, None))
+
+            elif open_tags == ["html"]:
+                self.unfinished.append(Element("body", {}, self.unfinished[-1]))
+
+            elif open_tags == ["html", "body"]:
+                break
+            else:
+                break
+
+    def finish(self):
+        while len(self.unfinished) > 1:
+            node = self.unfinished.pop()
+            self.unfinished[-1].children.append(node)
+        return self.unfinished.pop()
+
+
+# ============================================================
+# Chapter 3/4: Fonts
+# ============================================================
+
+# Font cache
+FONTS: Dict[Tuple[int, str, str, str], Tuple[tkinter.font.Font, tkinter.Label]] = {}
+
+def get_font(size: int, weight: str, slant: str, family: str) -> tkinter.font.Font:
+    key = (size, weight, slant, family)
     if key not in FONTS:
-        # Use a default family for better layout consistency
-        font = tkinter.font.Font(family='Arial', size=size, weight=weight, slant=style)
-        # label is used to ensure font metrics are available
-        label = tkinter.Label(font=font)
+        font = tkinter.font.Font(size=size, weight=weight, slant=slant, family=family)
+        label = tkinter.Label(font=font)  # helps metrics perf on some systems
         FONTS[key] = (font, label)
     return FONTS[key][0]
 
 
-class Text:
-    def __init__(self, text, parent):
+# ============================================================
+# Chapter 5: Paint commands (display list items)
+# ============================================================
+
+class DrawCommand:
+    top: int
+    bottom: int
+    def execute(self, scroll: int, canvas: tkinter.Canvas) -> None:
+        raise NotImplementedError
+
+class DrawText(DrawCommand):
+    def __init__(self, x: int, y: int, text: str, font: tkinter.font.Font, color: str):
+        self.left = x
+        self.top = y
         self.text = text
-        self.children = []
-        self.parent = parent
+        self.font = font
+        self.color = color  # Chapter 6: add color
+        self.bottom = y + font.metrics("linespace")
 
-    def __repr__(self):
-        return repr(self.text)
+    def execute(self, scroll: int, canvas: tkinter.Canvas) -> None:
+        canvas.create_text(self.left, self.top - scroll, text=self.text, font=self.font, anchor="nw", fill=self.color)
+
+class DrawRect(DrawCommand):
+    def __init__(self, x1: int, y1: int, x2: int, y2: int, color: str):
+        self.left = x1
+        self.top = y1
+        self.right = x2
+        self.bottom = y2
+        self.color = color
+
+    def execute(self, scroll: int, canvas: tkinter.Canvas) -> None:
+        canvas.create_rectangle(
+            self.left, self.top - scroll,
+            self.right, self.bottom - scroll,
+            width=0, fill=self.color
+        )
 
 
-class Element:
-    def __init__(self, tag, attributes, parent):
-        self.tag = tag
-        self.attributes = attributes
-        self.children = []
-        self.parent = parent
+# ============================================================
+# Chapter 5: Styles (reused from chap4 layout)
+# ============================================================
 
-    def __repr__(self):
-        return f"<{self.tag}>"
+@dataclass(frozen=True)
+class Style:
+    size: int = 16
+    weight: str = "normal"
+    slant: str = "roman"
+    family: str = "Times"
+    center: bool = False
+    in_sup: bool = False
+    in_abbr: bool = False
+    in_pre: bool = False
+    tag: Optional[str] = None
 
+@dataclass
+class LineItem:
+    text: str
+    font: tkinter.font.Font
+    color: str  # Chapter 6: add color
+    is_sup: bool = False
 
-class HTMLParser:
-    def __init__(self, body, view_source=False):
-        self.body = body
-        self.unfinished = []
-        self.view_source = view_source
-    
-    # Formatting tags that can be automatically closed/reopened for proper nesting
-    FORMATTING_TAGS = ["b", "i", "small", "big", "strong", "em", "u", "s", "sup", "sub"]
+# ============================================================
+# Chapter 5: Inline layout helper (per block)
+# ============================================================
 
-    def parse(self):
-        # view-source mode: convert HTML source to formatted HTML
-        if self.view_source:
-            return self.parse_view_source()
-        
-        # Tokenize first (lex) so we can cleanly handle comments and scripts
-        for typ, val in self.lex():
-            if typ == 'text':
-                self.add_text(val)
-            elif typ == 'tag':
-                self.add_tag(val)
-            elif typ == 'script':
-                self.add_script(val)
-        return self.finish()
-    
-    def parse_view_source(self):
-        """Parse HTML source for view-source display.
-        
-        Converts raw HTML into formatted HTML where:
-        - HTML tags are displayed in normal font
-        - Text content is displayed in bold
-        - Everything is wrapped in <pre> to preserve formatting
-        """
-        formatted_html = ['<html><body><pre>']
-        
-        for typ, val in self.lex():
-            if typ == 'text':
-                # Text content: make it bold and escape HTML entities
-                escaped = self.escape_html(val)
-                formatted_html.append(f'<b>{escaped}</b>')
-            elif typ == 'tag':
-                # Tag: display as-is with < > and escape inner content
-                escaped = self.escape_html(val)
-                formatted_html.append(f'&lt;{escaped}&gt;')
-            elif typ == 'script':
-                # Script content: treat as text (bold)
-                escaped = self.escape_html(val)
-                formatted_html.append(f'<b>{escaped}</b>')
-        
-        formatted_html.append('</pre></body></html>')
-        
-        # Parse the formatted HTML normally
-        formatted_source = ''.join(formatted_html)
-        parser = HTMLParser(formatted_source, view_source=False)
-        return parser.parse()
-    
-    def escape_html(self, text):
-        """Escape HTML special characters."""
-        return (text
-                .replace('&', '&amp;')
-                .replace('<', '&lt;')
-                .replace('>', '&gt;')
-                .replace('"', '&quot;')
-                .replace("'", '&#39;'))
+class InlineLayout:
+    """
+    Lays out inline text inside a single block, producing DrawText commands.
+    Coordinates are relative to (x, y) passed in, but commands are stored in absolute coords.
+    """
+    def __init__(self, node: Node, x: int, y: int, width: int):
+        self.node = node
+        self.x = x
+        self.y = y
+        self.width = max(width, 1)
 
-    def lex(self):
-        """A simple lexer yielding ('text', text), ('tag', tagtext), and ('script', scripttext).
+        self.style_stack: List[Style] = [Style()]
 
-        Comments (<!-- ... -->) are ignored — lex will not yield any token
-        for comment content so the parser creates no Text/Element for them.
-        
-        <script> tags are handled specially: content between <script> and </script>
-        is yielded as ('script', content) regardless of any < or > characters inside.
-        """
-        i = 0
-        s = self.body
-        n = len(s)
-        buf = []
-        while i < n:
-            c = s[i]
-            if c == '<':
-                # flush text buffer
-                if buf:
-                    yield ('text', ''.join(buf))
-                    buf = []
-                # detect comment
-                if s.startswith('!--', i+1):
-                    # find closing -->
-                    end = s.find('-->', i+4)
-                    if end == -1:
-                        # unterminated comment — skip rest
-                        return
-                    i = end + 3
-                    continue
-                # detect <script> tag
-                if s[i+1:i+7].lower() == 'script' and (i+7 >= n or s[i+7] in ' \t\n\r>'): 
-                    # find the closing '>' of opening <script> tag
-                    tag_end = s.find('>', i+1)
-                    if tag_end == -1:
-                        # malformed tag; treat rest as text
-                        buf.append(s[i:])
-                        break
-                    tagtext = s[i+1:tag_end]
-                    yield ('tag', tagtext)
-                    i = tag_end + 1
-                    
-                    # now find the closing </script>
-                    script_start = i
-                    script_end = s.find('</script>', i)
-                    if script_end == -1:
-                        # no closing tag, treat rest as script
-                        script_content = s[script_start:]
-                        yield ('script', script_content)
-                        return
-                    else:
-                        script_content = s[script_start:script_end]
-                        yield ('script', script_content)
-                        # yield closing </script> tag
-                        yield ('tag', '/script')
-                        i = script_end + len('</script>')
-                    continue
-                # otherwise find next '>'
-                end = s.find('>', i+1)
-                if end == -1:
-                    # malformed tag; treat rest as text
-                    buf.append(s[i:])
-                    break
-                tagtext = s[i+1:end]
-                yield ('tag', tagtext)
-                i = end + 1
-            else:
-                buf.append(c)
-                i += 1
-        if buf:
-            yield ('text', ''.join(buf))
+        self.line: List[LineItem] = []
+        self.line_width = 0
+        self.cursor_y = 0
 
-    def get_attributes(self, text):
-        parts = text.split()
-        tag = parts[0].casefold()
-        attributes = {}
-        for attrpair in parts[1:]:
-            if "=" in attrpair:
-                key, value = attrpair.split("=", 1)
-                if len(value) > 2 and value[0] in ["'", '"']:
-                    value = value[1:-1]
-                attributes[key.casefold()] = value
-            else:
-                attributes[attrpair.casefold()] = ""
-        return tag, attributes
+        self.commands: List[DrawCommand] = []
 
-    def add_text(self, text):
-        if text.isspace():
-            return
-        # Ensure implicit tags (html/head/body) are present
-        self.implicit_tags(None)
-        parent = self.unfinished[-1]
-        node = Text(text, parent)
-        parent.children.append(node)
-    
-    def add_script(self, script_content):
-        """Handle JavaScript content from <script> tags.
-        
-        Currently stores the script content but does not execute it.
-        This function is a placeholder for future JavaScript execution.
-        
-        Args:
-            script_content: The JavaScript code as a string
-        """
-        # TODO: Implement JavaScript execution
-        # For now, we simply ignore the script content
-        # Future implementation could:
-        # 1. Parse JavaScript using a JS parser
-        # 2. Execute JavaScript in a sandboxed environment
-        # 3. Handle DOM manipulation from JavaScript
-        pass
+        self.recurse(node)
+        self.flush_line(paragraph_gap=False)
 
-    SELF_CLOSING_TAGS = [
-        "area", "base", "br", "col", "embed", "hr", "img", "input",
-        "link", "meta", "param", "source", "track", "wbr",
-    ]
+        self.height = max(self.cursor_y, 0)
 
-    HEAD_TAGS = [
-        "base", "basefont", "bgsound", "noscript",
-        "link", "meta", "title", "style", "script",
-    ]
-    # Tags that should implicitly close when a sibling of the same tag opens
-    REOPEN_CLOSE_TAGS = ["p", "li", "div"]
+    @property
+    def style(self) -> Style:
+        return self.style_stack[-1]
 
-    def add_tag(self, tag):
-        tag, attributes = self.get_attributes(tag)
-        if tag.startswith("!"): 
-            return
-        # Insert any implicit ancestor/structure tags before handling this tag
-        self.implicit_tags(tag)
-        # If a start-tag of a reopen-close family appears while the same
-        # tag is already the immediate open element, implicitly close the
-        # previous one (treat as sibling). Example: <p>one<p>two -> close
-        # first <p> before opening second.
-        if not tag.startswith("/") and tag in self.REOPEN_CLOSE_TAGS:
-            if self.unfinished and self.unfinished[-1].tag == tag:
-                # close previous
-                self.add_tag(f"/{tag}")
-        
-        # Handle improperly nested formatting tags
-        # Example: <b>bold <i>both</b> italic</i> becomes <b>bold <i>both</i></b><i> italic</i>
-        if tag.startswith("/"):
-            closing_tag = tag[1:]  # Remove the '/'
-            if closing_tag in self.FORMATTING_TAGS:
-                # Find the matching opening tag
-                found_idx = None
-                for i in range(len(self.unfinished) - 1, -1, -1):
-                    if self.unfinished[i].tag == closing_tag:
-                        found_idx = i
-                        break
-                
-                if found_idx is not None:
-                    # Found the matching opening tag
-                    # Close all formatting tags between found_idx and the end
-                    tags_to_reopen = []
-                    for i in range(len(self.unfinished) - 1, found_idx, -1):
-                        if self.unfinished[i].tag in self.FORMATTING_TAGS:
-                            tags_to_reopen.append((self.unfinished[i].tag, self.unfinished[i].attributes))
-                    
-                    # Close the formatting tags in reverse order
-                    for _ in range(len(tags_to_reopen)):
-                        if len(self.unfinished) > 1:
-                            node = self.unfinished.pop()
-                            parent = self.unfinished[-1]
-                            parent.children.append(node)
-                    
-                    # Close the target tag
-                    if len(self.unfinished) > 1 and self.unfinished[-1].tag == closing_tag:
-                        node = self.unfinished.pop()
-                        parent = self.unfinished[-1]
-                        parent.children.append(node)
-                    
-                    # Reopen the closed formatting tags
-                    for tag_name, attrs in reversed(tags_to_reopen):
-                        parent = self.unfinished[-1] if self.unfinished else None
-                        node = Element(tag_name, attrs, parent)
-                        self.unfinished.append(node)
-                    return
-            
-            # Normal closing tag handling
-            if len(self.unfinished) == 1:
+    def current_font(self) -> tkinter.font.Font:
+        s = self.style
+        return get_font(s.size, s.weight, s.slant, s.family)
+
+    def push_style(self, **changes) -> None:
+        self.style_stack.append(replace(self.style, **changes))
+
+    def pop_style_to_tag(self, tagname: str) -> None:
+        for i in range(len(self.style_stack) - 1, 0, -1):
+            if self.style_stack[i].tag == tagname:
+                del self.style_stack[i:]
                 return
-            node = self.unfinished.pop()
-            parent = self.unfinished[-1]
-            parent.children.append(node)
-        elif tag in self.SELF_CLOSING_TAGS:
-            parent = self.unfinished[-1]
-            node = Element(tag, attributes, parent)
-            parent.children.append(node)
-        else:
-            parent = self.unfinished[-1] if self.unfinished else None
-            node = Element(tag, attributes, parent)
-            self.unfinished.append(node)
 
-    def finish(self):
-        # Ensure implicit root tags exist if nothing was opened
-        if not self.unfinished:
-            self.implicit_tags(None)
-        while len(self.unfinished) > 1:
-            node = self.unfinished.pop()
-            parent = self.unfinished[-1]
-            parent.children.append(node)
-        return self.unfinished.pop()
+    def word_fits(self, w: int) -> bool:
+        # Relative widths inside this block
+        return (self.line_width + w) <= self.width
+    
+    def push_piece(self, text: str, font: tkinter.font.Font, color: str, is_sup: bool) -> None:
+        self.line.append(LineItem(text=text, font=font, color=color, is_sup=is_sup))
+        self.line_width += font.measure(text)
 
-    def implicit_tags(self, tag):
-        """Auto-insert implicit structural tags like html/head/body.
+    def push_space(self, font: tkinter.font.Font, color: str) -> None:
+        self.push_piece(" ", font, color, is_sup=False)
 
-        Simple rules:
-        - If nothing is open and next tag isn't 'html', open 'html'.
-        - If only 'html' is open and next tag isn't 'head','body','/html',
-          open 'head' if next tag is a head tag, otherwise open 'body'.
-        - If 'html'->'head' is open and the next tag doesn't belong to head,
-          close 'head'.
-        """
-        while True:
-            open_tags = [node.tag for node in self.unfinished]
-            if open_tags == [] and tag != "html":
-                self.add_tag("html")
-            elif open_tags == ["html"] and tag not in ["head", "body", "/html"]:
-                if tag in self.HEAD_TAGS:
-                    self.add_tag("head")
-                else:
-                    self.add_tag("body")
-            elif open_tags == ["html", "head"] and tag not in ["/head"] + self.HEAD_TAGS:
-                self.add_tag("/head")
-            else:
-                break
-
-
-class Layout:
-    def __init__(self, tree):
-        self.display_list = []
-
-        self.cursor_x = HSTEP
-        self.cursor_y = VSETEP
-        self.weight = "normal"
-        self.style = "roman"
-        self.size = 12
-
-        self.line = []
-        self.recurse(tree)
-        self.flush()
-
-    def recurse(self, tree):
-        if isinstance(tree, Text):
-            for word in tree.text.split():
-                self.word(word)
-        else:
-            self.open_tag(tree.tag)
-            for child in tree.children:
-                self.recurse(child)
-            self.close_tag(tree.tag)
-
-    def open_tag(self, tag):
-        if tag == "i":
-            self.style = "italic"
-        elif tag == "b":
-            self.weight = "bold"
-        elif tag == "small":
-            self.size -= 2
-        elif tag == "big":
-            self.size += 4
-        elif tag == "br":
-            self.flush()
-
-    def close_tag(self, tag):
-        if tag == "i":
-            self.style = "roman"
-        elif tag == "b":
-            self.weight = "normal"
-        elif tag == "small":
-            self.size += 2
-        elif tag == "big":
-            self.size -= 4
-        elif tag == "p":
-            self.flush()
-            self.cursor_y += VSETEP
-
-    def word(self, word):
-        font = get_font(self.size, self.weight, self.style)
-        w = font.measure(word)
-        if self.cursor_x + w > WIDTH - HSTEP:
-            self.flush()
-        self.line.append((self.cursor_x, word, font))
-        # add a space width
-        self.cursor_x += w + font.measure(" ")
-
-    def flush(self):
+    def flush_line(self, paragraph_gap: bool) -> None:
         if not self.line:
+            if paragraph_gap:
+                self.cursor_y += 20
             return
-        metrics = [font.metrics() for x, word, font in self.line]
-        max_ascent = max([metric["ascent"] for metric in metrics])
-        # Slightly tighter line spacing than original 1.25
-        baseline = self.cursor_y + 1.10 * max_ascent
-        for x, word, font in self.line:
-            y = baseline - font.metrics("ascent")
-            self.display_list.append((x, y, word, font))
-        max_descent = max([metric["descent"] for metric in metrics])
-        self.cursor_y = baseline + 1.10 * max_descent
-        self.cursor_x = HSTEP
-        self.line = []
 
+        ascents = [it.font.metrics("ascent") for it in self.line]
+        max_ascent = max(ascents) if ascents else 0
+        max_descent = max(it.font.metrics("descent") for it in self.line) if self.line else 0
+
+        non_sup_ascents = [it.font.metrics("ascent") for it in self.line if not it.is_sup]
+        ref_ascent = max(non_sup_ascents) if non_sup_ascents else max_ascent
+
+        baseline = self.cursor_y + max_ascent
+
+        if self.style.center:
+            start_x = max((self.width - self.line_width) // 2, 0)
+        else:
+            start_x = 0
+
+        rel_x = start_x
+        for it in self.line:
+            ascent = it.font.metrics("ascent")
+            y_top = baseline - ascent
+            if it.is_sup:
+                y_top = baseline - ref_ascent
+            abs_x = self.x + rel_x
+            abs_y = self.y + y_top
+            self.commands.append(DrawText(abs_x, abs_y, it.text, it.font, it.color))
+            rel_x += it.font.measure(it.text)
+
+        self.cursor_y = baseline + max_descent
+        if paragraph_gap:
+            self.cursor_y += 12
+
+        self.line.clear()
+        self.line_width = 0
+
+    # ---- text placement helpers
+    def add_word_plain(self, word: str, font: tkinter.font.Font, color: str) -> None:
+        w = font.measure(word)
+
+        if (not self.style.in_pre) and (not self.word_fits(w)) and self.line:
+            self.flush_line(paragraph_gap=False)
+
+        self.push_piece(word, font, color, is_sup=self.style.in_sup)
+        if not self.style.in_pre:
+            self.push_space(font, color)
+
+    def add_word_with_soft_hyphens(self, word: str, font: tkinter.font.Font, color: str) -> None:
+        plain = word.replace(SOFT_HYPHEN, "")
+        plain_w = font.measure(plain)
+
+        if self.style.in_pre:
+            self.add_word_plain(plain, font, color)
+            return
+
+        if self.word_fits(plain_w) or not self.line:
+            self.add_word_plain(plain, font, color)
+            return
+
+        if SOFT_HYPHEN not in word:
+            self.flush_line(paragraph_gap=False)
+            self.add_word_plain(plain, font, color)
+            return
+
+        parts = word.split(SOFT_HYPHEN)
+        best_i = None
+        best_prefix = ""
+        for i in range(1, len(parts) + 1):
+            prefix = "".join(parts[:i]) + "-"
+            if self.word_fits(font.measure(prefix)):
+                best_i = i
+                best_prefix = prefix
+
+        if best_i is None:
+            self.flush_line(paragraph_gap=False)
+            self.add_word_with_soft_hyphens(word, font, color)
+            return
+
+        self.add_word_plain(best_prefix, font, color)
+        self.flush_line(paragraph_gap=False)
+        remainder = "".join(parts[best_i:])
+        if remainder:
+            self.add_word_plain(remainder, font, color)
+
+    def add_abbr_word(self, word: str, normal_font: tkinter.font.Font, color: str) -> None:
+        small_size = max(8, int(self.style.size * 0.8))
+        small_font = get_font(small_size, "bold", self.style.slant, self.style.family)
+
+        runs: List[Tuple[str, tkinter.font.Font]] = []
+        cur_font: Optional[tkinter.font.Font] = None
+        cur_text = ""
+
+        def flush_run():
+            nonlocal cur_font, cur_text
+            if cur_text:
+                runs.append((cur_text, cur_font))
+            cur_text = ""
+
+        for ch in word:
+            if ch.islower():
+                out = ch.upper()
+                f = small_font
+            else:
+                out = ch
+                f = normal_font
+
+            if cur_font is None:
+                cur_font = f
+                cur_text = out
+            elif f == cur_font:
+                cur_text += out
+            else:
+                flush_run()
+                cur_font = f
+                cur_text = out
+        flush_run()
+
+        total_w = sum(f.measure(t) for t, f in runs)
+        if (not self.style.in_pre) and (not self.word_fits(total_w)) and self.line:
+            self.flush_line(paragraph_gap=False)
+
+        for t, f in runs:
+            self.push_piece(t, f, color, is_sup=self.style.in_sup)
+        if not self.style.in_pre:
+            self.push_space(normal_font, color)
+
+    def add_pre_text(self, text: str, font: tkinter.font.Font, color: str) -> None:
+        for ch in text:
+            if ch == "\n":
+                self.flush_line(paragraph_gap=False)
+            elif ch == "\t":
+                self.push_piece("    ", font, color, is_sup=self.style.in_sup)
+            else:
+                if ch == SOFT_HYPHEN:
+                    continue
+                self.push_piece(ch, font, color, is_sup=self.style.in_sup)
+
+    # ---- tree walk
+    def recurse(self, node: Node) -> None:
+        if isinstance(node, Text):
+            # Chapter 6: Get font and color from node.style
+            weight = node.style["font-weight"]
+            style_val = node.style["font-style"]
+            if style_val == "normal":
+                style_val = "roman"
+            size = int(float(node.style["font-size"][:-2]) * 0.75)
+            family = node.style.get("font-family", "Times") 
+            font = get_font(size, weight, style_val, family)  # family 인자 추가
+            color = node.style["color"]
+            
+            if self.style.in_pre:
+                self.add_pre_text(node.text, font, color)
+            else:
+                for w in node.text.split():
+                    if self.style.in_abbr:
+                        self.add_abbr_word(w, font, color)
+                    else:
+                        self.add_word_with_soft_hyphens(w, font, color)
+            return
+
+        assert isinstance(node, Element)
+        self.open_element(node)
+        for child in node.children:
+            self.recurse(child)
+        self.close_element(node)
+
+    def open_element(self, elt: Element) -> None:
+        tag = elt.tag
+
+        # inline controls
+        if tag == "br":
+            self.flush_line(paragraph_gap=False)
+            return
+
+        # formatting
+        if tag == "b":
+            self.push_style(weight="bold", tag="b")
+        elif tag == "i":
+            self.push_style(slant="italic", tag="i")
+        elif tag == "small":
+            self.push_style(size=max(8, self.style.size - 2), tag="small")
+        elif tag == "big":
+            self.push_style(size=self.style.size + 4, tag="big")
+        elif tag == "sup":
+            self.push_style(size=max(8, self.style.size // 2), in_sup=True, tag="sup")
+        elif tag == "abbr":
+            self.push_style(in_abbr=True, tag="abbr")
+        elif tag == "pre":
+            self.push_style(in_pre=True, family="Courier New", tag="pre")
+        elif tag == "h1" and elt.attributes.get("class", "") == "title":
+            self.push_style(center=True, size=24, weight="bold", tag="h1-title")
+        else:
+            pass
+
+    def close_element(self, elt: Element) -> None:
+        tag = elt.tag
+
+        if tag == "h1" and elt.attributes.get("class", "") == "title":
+            self.flush_line(paragraph_gap=False)
+            self.pop_style_to_tag("h1-title")
+            return
+
+        if tag in ("b", "i", "small", "big", "sup", "abbr"):
+            self.pop_style_to_tag(tag)
+        elif tag == "pre":
+            self.flush_line(paragraph_gap=False)
+            self.pop_style_to_tag("pre")
+
+
+# ============================================================
+# Chapter 5: Layout tree (DocumentLayout + BlockLayout)
+# ============================================================
+
+class DocumentLayout:
+    def __init__(self, node: Element, viewport_width: int, viewport_height: int):
+        self.node = node
+        self.parent = None
+        self.children: List["BlockLayout"] = []
+        self.x = HSTEP
+        self.y = VSTEP
+        self.width = max(viewport_width - 2 * HSTEP, 1)
+        self.height = max(viewport_height, 1)
+
+    def layout(self) -> None:
+        child = BlockLayout(self.node, self, previous=None)
+        self.children = [child]
+        child.layout()
+        self.height = child.height
+
+    def paint(self) -> List[DrawCommand]:
+        return []
+
+class BlockLayout:
+    def __init__(self, node: Node, parent: Union["DocumentLayout", "BlockLayout"], previous: Optional["BlockLayout"]):
+        self.node = node
+        self.parent = parent
+        self.previous = previous
+
+        self.children: List["BlockLayout"] = []
+
+        self.x = 0
+        self.y = 0
+        self.width = 0
+        self.height = 0
+
+        # for inline mode
+        self.inline: Optional[InlineLayout] = None
+
+    def layout_mode(self) -> str:
+        if isinstance(self.node, Text):
+            return "inline"
+        assert isinstance(self.node, Element)
+
+        # If any child is a block element, this is block mode.
+        for child in self.node.children:
+            if isinstance(child, Element) and child.tag in BLOCK_ELEMENTS:
+                return "block"
+
+        # Otherwise, if it has children, inline mode (text flow).
+        if self.node.children:
+            return "inline"
+        return "block"
+
+    def layout(self) -> None:
+        # Position/width come from parent & previous sibling
+        self.x = self.parent.x
+        self.width = self.parent.width
+
+        if self.previous:
+            self.y = self.previous.y + self.previous.height
+        else:
+            self.y = self.parent.y
+
+        mode = self.layout_mode()
+
+        if mode == "block":
+            prev = None
+            for child in self.node.children:
+                # Skip pure whitespace text nodes in block flow to avoid creating empty blocks
+                if isinstance(child, Text) and not child.text.strip():
+                    continue
+                nxt = BlockLayout(child, self, previous=prev)
+                self.children.append(nxt)
+                prev = nxt
+
+            for c in self.children:
+                c.layout()
+
+            self.height = sum(c.height for c in self.children)
+
+        else:
+            # Inline mode: lay out all text inside this node.
+            self.inline = InlineLayout(self.node, x=self.x, y=self.y, width=self.width)
+            self.height = self.inline.height
+
+        # Simple vertical spacing for some block types (keeps chap4 feel)
+        if isinstance(self.node, Element):
+            if self.node.tag == "p":
+                self.height += 12
+            elif self.node.tag == "pre":
+                self.height += 12
+            elif self.node.tag == "h1" and self.node.attributes.get("class", "") == "title":
+                self.height += 16
+
+        # Ensure non-negative
+        if self.height < 0:
+            self.height = 0
+
+    def paint(self) -> List[DrawCommand]:
+        cmds: List[DrawCommand] = []
+
+        # Background for <pre>
+        if isinstance(self.node, Element) and self.node.tag == "pre":
+            cmds.append(DrawRect(
+                self.x,
+                self.y,
+                self.x + self.width,
+                self.y + self.height,
+                "gray"
+            ))
+
+        if self.inline is not None:
+            cmds.extend(self.inline.commands)
+
+        return cmds
+
+
+def paint_tree(layout_obj: Union[DocumentLayout, BlockLayout], out: List[DrawCommand]) -> None:
+    out.extend(layout_obj.paint())
+    for child in getattr(layout_obj, "children", []):
+        paint_tree(child, out)
+
+
+# ============================================================
+# Browser (ch1 networking + ch2 GUI + ch5 layout)
+# ============================================================
 
 class Browser:
-    def __init__(self):
+    def __init__(self, default_file: str):
+        self.sockets: Dict[Tuple[str, str, int], socket.socket] = {}
+        self.cache: Dict[str, Tuple[float, Response]] = {}
+
+        self.default_file = default_file
+
         self.window = tkinter.Tk()
-        self.window.title("Simple Browser")
-        self.window.geometry(f"{WIDTH}x{HEIGHT}+{X_POS}+{Y_POS}")
-        self.window.resizable(True, True)
+        self.canvas = tkinter.Canvas(self.window, width=WIDTH, height=HEIGHT)
+        self.canvas.pack(fill="both", expand=True)
 
-        # Simple Canvas (no scrollbar)
-        self.canvas = tkinter.Canvas(self.window, width=WIDTH, height=HEIGHT, bg="white")
-        self.canvas.pack(fill=tkinter.BOTH, expand=True)
+        self.scroll = 0
+        self.doc_height = HEIGHT
+        self.current_url: Optional[str] = None
 
-        self.window.bind('<Control-q>', lambda e: self.window.quit())
+        self.tree: Optional[Element] = None
+        self.display_list: List[DrawCommand] = []
+        self.document: Optional[DocumentLayout] = None
 
-        self.display_list = []
+        self.window.bind("<Down>", lambda e: self.scroll_by(+SCROLL_STEP))
+        self.window.bind("<Up>", lambda e: self.scroll_by(-SCROLL_STEP))
+        self.window.bind("<MouseWheel>", self.on_mousewheel)
+        self.window.bind("<Button-4>", lambda e: self.scroll_by(-SCROLL_STEP))
+        self.window.bind("<Button-5>", lambda e: self.scroll_by(+SCROLL_STEP))
+        self.window.bind("<Configure>", self.on_resize)
+        self.default_style_sheet = CSSParser("""
+            pre { background-color: gray; }
+            a { color: blue; }
+            i { font-style: italic; }
+            b { font-weight: bold; }
+            small { font-size: 90%; }
+            big { font-size: 110%; }
+        """).parse()
 
-        self.draw_init_content()
+    def load(self, url: Optional[str]) -> None:
+        if not url:
+            url = f"file://{self.default_file}"
+        self.current_url = url
 
-    # Scrollbar and scrolling removed: static rendering only
-
-    def draw_init_content(self):
-        canvas_width = self.canvas.winfo_width() or WIDTH
-        canvas_height = self.canvas.winfo_height() or HEIGHT
-        for i in range(0, canvas_width, HSTEP):
-            self.canvas.create_line(i, 0, i, canvas_height, fill="lightgray")
-        for j in range(0, canvas_height, VSETEP):
-            self.canvas.create_line(0, j, canvas_width, j, fill="lightgray")
-        self.canvas.create_text(canvas_width//2, canvas_height//2, text="Welcome to the Simple Browser!", font=("Arial", 24), fill="black")
-
-    def load(self, url: URL):
         try:
-            body = url.request()
-            # parse HTML and create layout/display list
-            self.nodes = HTMLParser(body).parse()
-            self.display_list = Layout(self.nodes).display_list
-        except Exception as e:
-            # show error in GUI
-            msg = f"❌ 오류 발생: {e}"
-            self.display_list = [(HSTEP, VSETEP, msg, get_font(12, 'normal', 'roman'))]
+            u = URL(url)
+        except Exception:
+            u = URL("about:blank")
+            self.current_url = "about:blank"
+
+        resp = self.fetch(u, redirects_left=MAX_REDIRECTS)
+        body_text = self.decode_text(resp)
+
+        if resp.url.view_source:
+            # Render source literally
+            root = Element("html", {}, None)
+            body = Element("body", {}, root)
+            pre = Element("pre", {}, body)
+            pre.children.append(Text(body_text, pre))
+            body.children.append(pre)
+            root.children.append(body)
+            self.tree = root
+        else:
+            body_text = self.decode_entities(body_text)
+            self.tree = HTMLParser(body_text).parse()
+
+        # Chapter 6: Apply CSS styles
+        rules = self.default_style_sheet.copy()
+        
+        # Find and load linked stylesheets
+        links = [node.attributes["href"]
+                for node in tree_to_list(self.tree, [])
+                if isinstance(node, Element)
+                and node.tag == "link"
+                and node.attributes.get("rel") == "stylesheet"
+                and "href" in node.attributes]
+        
+        # Download and parse each linked stylesheet
+        for link in links:
+            style_url = u.resolve(link)
+            try:
+                body = self.decode_text(self.fetch(style_url, redirects_left=MAX_REDIRECTS))
+                rules.extend(CSSParser(body).parse())
+            except:
+                continue
+        
+        # Sort rules by cascade priority and apply to tree
+        style(self.tree, sorted(rules, key=cascade_priority))
+
+        self.relayout()
+        self.scroll = 0
         self.draw()
 
-    def draw(self):
+    def relayout(self) -> None:
+        w = max(self.canvas.winfo_width(), 1)
+        h = max(self.canvas.winfo_height(), 1)
+        assert self.tree is not None
+
+        self.document = DocumentLayout(self.tree, viewport_width=w, viewport_height=h)
+        self.document.layout()
+
+        self.display_list = []
+        paint_tree(self.document, self.display_list)
+
+        self.doc_height = max(self.document.height + 2 * VSTEP, h)
+
+    def draw(self) -> None:
         self.canvas.delete("all")
-        canvas_height = self.canvas.winfo_height() or HEIGHT
-        canvas_width = self.canvas.winfo_width() or WIDTH
-        for x, y, word, font in self.display_list:
-            # static rendering: place words at their computed y coordinate
-            self.canvas.create_text(x, y, text=word, font=font, anchor="nw")
+        h = max(self.canvas.winfo_height(), 1)
+
+        for cmd in self.display_list:
+            if cmd.top > self.scroll + h:
+                continue
+            if cmd.bottom < self.scroll:
+                continue
+            cmd.execute(self.scroll, self.canvas)
+
+        self.clamp_scroll()
+
+    # ---- scrolling
+    def clamp_scroll(self) -> None:
+        h = max(self.canvas.winfo_height(), 1)
+        max_scroll = max(self.doc_height - h, 0)
+        self.scroll = max(0, min(self.scroll, max_scroll))
+
+    def scroll_by(self, delta: int) -> None:
+        self.scroll += delta
+        self.clamp_scroll()
+        self.draw()
+
+    def on_mousewheel(self, e) -> None:
+        self.scroll_by(-SCROLL_STEP if e.delta > 0 else +SCROLL_STEP)
+
+    def on_resize(self, e) -> None:
+        if e.width < 50 or e.height < 50:
+            return
+        if not self.tree:
+            return
+        self.relayout()
+        self.draw()
+
+    # ---- chapter 1: fetch/request (gzip + chunked + basic cache/redirect)
+    def fetch(self, url: URL, redirects_left: int) -> Response:
+        if url.scheme == "about":
+            return Response(url=url, status=200, reason="OK", headers={}, body=b"")
+
+        cache_key = url.cache_key()
+        now = time.time()
+        if url.scheme in ["http", "https"]:
+            cached = self.cache.get(cache_key)
+            if cached:
+                expires_at, resp = cached
+                if now < expires_at:
+                    return resp
+                del self.cache[cache_key]
+
+        if url.scheme == "file":
+            with open(url.path, "rb") as f:
+                return Response(url=url, status=200, reason="OK", headers={}, body=f.read())
+
+        if url.scheme == "data":
+            body = url.data_payload.encode("utf-8", errors="replace")
+            return Response(url=url, status=200, reason="OK", headers={"content-type": url.data_mime}, body=body)
+
+        resp = self.request_http(url)
+
+        if 300 <= resp.status <= 399 and "location" in resp.headers and redirects_left > 0:
+            loc = resp.headers["location"]
+            next_url = self.resolve_location(url, loc)
+            prefix = "view-source:" if url.view_source else ""
+            return self.fetch(URL(prefix + next_url), redirects_left - 1)
+
+        if url.scheme in ["http", "https"] and resp.status == 200:
+            expires_at = self.compute_cache_expiry(resp.headers.get("cache-control", ""))
+            if expires_at is not None:
+                self.cache[cache_key] = (expires_at, resp)
+
+        return resp
+
+    def request_http(self, url: URL) -> Response:
+        if url.view_source:
+            inner_str = url.original
+            if inner_str.startswith("view-source:"):
+                inner_str = inner_str[len("view-source:"):]
+            inner = URL(inner_str)
+            resp = self.request_http(inner)
+            return replace(resp, url=url)
+
+        key = (url.scheme, url.host, url.port)
+        s = self.sockets.get(key)
+        if s is None:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+            s.connect((url.host, url.port))
+            if url.scheme == "https":
+                ctx = ssl.create_default_context()
+                s = ctx.wrap_socket(s, server_hostname=url.host)
+            self.sockets[key] = s
+
+        headers = {
+            "Host": url.host,
+            "User-Agent": "toy-browser/5.0 (WebBrowserEngineering)",
+            "Connection": "keep-alive",
+            "Accept-Encoding": "gzip",
+        }
+
+        req = f"GET {url.path} HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
+        s.send(req.encode("utf-8"))
+
+        f = s.makefile("rb")
+        statusline = f.readline().decode("iso-8859-1", errors="replace").rstrip("\r\n")
+        if not statusline:
+            self.close_socket(key)
+            return self.request_http(url)
+
+        parts = statusline.split(" ", 2)
+        if len(parts) < 2:
+            self.close_socket(key)
+            return self.request_http(url)
+        try:
+            status_i = int(parts[1])
+        except ValueError:
+            self.close_socket(key)
+            return self.request_http(url)
+        reason = parts[2] if len(parts) >= 3 else ""
+
+        resp_headers: Dict[str, str] = {}
+        while True:
+            line = f.readline()
+            if line in (b"\r\n", b"\n", b""):
+                break
+            decoded = line.decode("iso-8859-1", errors="replace").rstrip("\r\n")
+            if ":" not in decoded:
+                continue
+            k, v = decoded.split(":", 1)
+            resp_headers[k.casefold()] = v.strip()
+
+        body = self.read_body_bytes(f, resp_headers)
+
+        if resp_headers.get("content-encoding", "").lower() == "gzip":
+            body = gzip.decompress(body)
+            resp_headers.pop("content-encoding", None)
+
+        if resp_headers.get("connection", "").lower() == "close":
+            self.close_socket(key)
+
+        return Response(url=url, status=status_i, reason=reason, headers=resp_headers, body=body)
+
+    def read_body_bytes(self, f, headers: Dict[str, str]) -> bytes:
+        if headers.get("transfer-encoding", "").lower() == "chunked":
+            chunks = []
+            while True:
+                line = f.readline().strip()
+                size = int(line.split(b";", 1)[0], 16)
+                if size == 0:
+                    while True:
+                        trailer = f.readline()
+                        if trailer in (b"\r\n", b"\n", b""):
+                            break
+                    break
+                chunks.append(f.read(size))
+                f.read(2)  # CRLF
+            return b"".join(chunks)
+
+        if "content-length" in headers:
+            return f.read(int(headers["content-length"]))
+
+        return f.read()
+
+    def resolve_location(self, base: URL, loc: str) -> str:
+        if "://" in loc or loc.startswith(("data:", "file:", "view-source:", "about:")):
+            return loc
+        if loc.startswith("/"):
+            return f"{base.scheme}://{base.host}:{base.port}{loc}"
+        base_dir = base.path.rsplit("/", 1)[0]
+        return f"{base.scheme}://{base.host}:{base.port}{base_dir}/{loc}"
+
+    def compute_cache_expiry(self, cache_control: str) -> Optional[float]:
+        cc = cache_control.lower()
+        if not cc:
+            return None
+        parts = [p.strip() for p in cc.split(",") if p.strip()]
+        for p in parts:
+            if p == "no-store":
+                return None
+            if p.startswith("max-age="):
+                try:
+                    return time.time() + int(p.split("=", 1)[1])
+                except ValueError:
+                    return None
+            return None
+        return None
+
+    def decode_text(self, resp: Response) -> str:
+        return resp.body.decode("utf-8", errors="replace")
+
+    def decode_entities(self, text: str) -> str:
+        # keep minimal entities + soft hyphen for exercise 3-3
+        return (
+            text.replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&")
+                .replace("&shy;", SOFT_HYPHEN)
+        )
+
+    def close_socket(self, key: Tuple[str, str, int]) -> None:
+        s = self.sockets.pop(key, None)
+        if s:
+            try:
+                s.close()
+            except Exception:
+                pass
+
 
 if __name__ == "__main__":
-    import sys
-    # Allow a quick parser test: python Browser.py --test
-    def test_parser_comments():
-        samples = [
-            ("Hello <!-- skip this -->World", "Hello World"),
-            ("<meta charset=\"utf-8\"><p>Para<!--x-->Two</p>", "Para Two"),
-            ("<!-- full comment --><b>Bold</b>", "Bold"),
-        ]
-        for src, expect in samples:
-            p = HTMLParser(src)
-            tree = p.parse()
-            # collect text nodes
-            def collect(node):
-                out = []
-                if isinstance(node, Text):
-                    out.append(' '.join(node.text.split()))
-                for ch in getattr(node, 'children', []):
-                    out.append(collect(ch))
-                return ' '.join([x for x in out if x])
-            result = collect(tree)
-            print('SRC:', src)
-            print('PARSED TEXT:', result)
-            print('EXPECTED (approx):', expect)
-            print('---')
+    DEFAULT_FILE = "./test.html"
+    url = sys.argv[1] if len(sys.argv) > 1 else None
 
-    if len(sys.argv) > 1 and sys.argv[1] == '--test':
-        test_parser_comments()
-        sys.exit(0)
-    b = Browser()
-    if len(sys.argv) > 1:
-        b.load(URL(sys.argv[1]))
-    b.window.mainloop()
+    b = Browser(default_file=DEFAULT_FILE)
+    b.load(url)
+    tkinter.mainloop()
